@@ -29,11 +29,17 @@ import json
 
 import boto3
 import botocore
+import botocore.config
 from botocore.exceptions import ClientError
 
 
 def presign(a):
-    s3 = boto3.client("s3", region_name=a.region)
+    # Regional endpoint + SigV4: global-endpoint URLs for a non-us-east-1 bucket
+    # get 403/redirects (especially for new buckets) with older botocore.
+    s3 = boto3.client("s3", region_name=a.region,
+                      endpoint_url=f"https://s3.{a.region}.amazonaws.com",
+                      config=botocore.config.Config(signature_version="s3v4",
+                                                    s3={"addressing_style": "virtual"}))
     out = []
     for page in s3.get_paginator("list_objects_v2").paginate(Bucket=a.bucket, Prefix=a.prefix):
         for obj in page.get("Contents", []):
