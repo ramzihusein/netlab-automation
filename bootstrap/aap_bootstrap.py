@@ -175,6 +175,9 @@ def eda_side(org_id, stream_ct):
         "eda_credential_id": stream_cred["id"], "organization_id": org_id, "test_mode": False,
     }, update=False)
 
+    # EDA may advertise a single node's internal hostname; post via the gateway instead.
+    path = urllib.parse.urlsplit(stream["url"]).path
+    stream["url"] = BASE + path
     if new_token is not None:
         ensure(f"{C}/credentials/", "NetLab EDA Event Stream", {
             "credential_type": stream_ct["id"], "organization": org_id,
