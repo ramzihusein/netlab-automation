@@ -257,7 +257,8 @@
       ansible.builtin.wait_for:
         host: "{{ item.mgmt_ip }}"
         port: 22
-        timeout: 60
+        search_regex: "^SSH-"
+        timeout: 120
       loop: "{{ nodes }}"
       loop_control:
         label: "{{ item.name }} {{ item.mgmt_ip }}"

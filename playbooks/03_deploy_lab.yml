@@ -70,10 +70,13 @@
 
   tasks:
 
+    # vrnetlab (c8000v) opens port 22 as soon as QEMU starts, long before
+    # IOS-XE is up, so wait for the SSH banner rather than an open port.
     - name: Wait for SSH on each device mgmt IP (routed via the lab host)
       ansible.builtin.wait_for:
         host: "{{ item.mgmt_ip }}"
         port: 22
+        search_regex: "^SSH-"
         timeout: "{{ 1200 if item.kind == 'cisco_c8000v' else 600 }}"
       loop: "{{ lab_active_nodes }}"
       loop_control:
