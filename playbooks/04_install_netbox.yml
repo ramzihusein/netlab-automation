@@ -40,12 +40,30 @@
               ports:
                 - "{{ netbox_port }}:8080"
 
-    - name: Start NetBox (first start pulls images and runs migrations)
-      ansible.builtin.command: docker compose up -d --wait
+    # First start runs all migrations, which outlasts the container healthcheck
+    # on small instances; start netbox alone, wait for its API, then the rest
+    # (the workers depend on netbox being healthy).
+    - name: Start NetBox web service (first start pulls images and runs migrations)
+      ansible.builtin.command: docker compose up -d netbox
       args:
         chdir: "{{ netbox_docker_dir }}"
       register: compose_up
       changed_when: "'Started' in compose_up.stderr or 'Created' in compose_up.stderr"
+
+    - name: Wait for NetBox API (migrations finished)
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ netbox_port }}/api/status/"
+      register: nb_first_start
+      until: nb_first_start.status == 200
+      retries: 120
+      delay: 10
+
+    - name: Start remaining NetBox services
+      ansible.builtin.command: docker compose up -d --wait
+      args:
+        chdir: "{{ netbox_docker_dir }}"
+      register: compose_up_all
+      changed_when: "'Started' in compose_up_all.stderr"
 
     - name: Bring NetBox back after instance stop/start
       ansible.builtin.copy:
