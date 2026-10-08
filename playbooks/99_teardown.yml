@@ -66,6 +66,12 @@
         state: absent
         wait: true
 
+    - name: Delete nested-virtualization launch template
+      amazon.aws.ec2_launch_template:
+        region: "{{ aws_region }}"
+        name: netlab-nested-virt
+        state: absent
+
     - name: Delete security groups
       amazon.aws.ec2_security_group:
         name: "{{ item }}"

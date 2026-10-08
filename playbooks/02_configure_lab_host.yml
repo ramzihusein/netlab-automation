@@ -311,7 +311,7 @@
         fail_msg: >-
           No usable NOS image. Upload cEOS (cEOS64-lab-*.tar.xz) and/or Cisco IOL (*.iol / *iol*.bin)
           to s3://{{ hostvars['localhost'].netlab_images_bucket }}/images/ and rerun.
-          c8000v (*.qcow2) additionally needs a KVM-capable instance type.
+          c8000v (*.qcow2) additionally needs /dev/kvm (m8i/c8i/r8i with nested virtualization).
 
     - name: Print lab host summary
       ansible.builtin.debug:

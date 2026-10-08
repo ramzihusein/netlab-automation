@@ -9,7 +9,7 @@ reachable from both AAP and NetBox, and NetBox driving **Event-Driven Ansible**.
  ┌──────────────────────────────────────────────────────────────────────────┐
  │  aap-exec-1/2 ─── ssh ───┐                                               │
  │                          ▼                                               │
- │                  netlab-lab-host (m6i.2xlarge, src/dst check off)        │
+ │                  netlab-lab-host (m8i.2xlarge + nested virt, src/dst off)│
  │                    br-netlab 172.20.20.0/24  (docker nat-unprotected)    │
  │                     ├─ eos-spine1 .11   ├─ ios-spine2 .12                │
  │                     └─ eos-leaf1  .21   └─ ios-leaf2  .22                │
@@ -45,7 +45,13 @@ Result: AAP execution nodes and NetBox connect straight to `172.20.20.x`.
 |---|---|---|
 | Arista cEOS | arista.com → Software Downloads → cEOS-lab (free account) | `cEOS64-lab-<ver>.tar.xz` |
 | Cisco IOL (recommended) | CML refplat ISO → `x86_64_crb_linux-adventerprisek9-ms.iol` | any `*.iol` / `*iol*.bin` (L3 image) |
-| Cisco Catalyst 8000V | software.cisco.com | `c8000v-*.qcow2` (needs a KVM-capable instance type) |
+| Cisco Catalyst 8000V | software.cisco.com, non-EFI serial build | `c8000v-universalk9_8G_serial.<ver>.qcow2` |
+
+The c8000v is a VM inside its container, so the lab host needs `/dev/kvm`. The
+default lab host type, `m8i.2xlarge`, is launched from a launch template with
+EC2 nested virtualization enabled (8th-gen Intel c8i/m8i/r8i only), which costs
+about a tenth of a `.metal` instance. To change the type, rerun **Provision
+Infra** with `lab_instance_type=<type> lab_replace=true`.
 
 ```bash
 aws s3 cp cEOS64-lab-4.xx.tar.xz            s3://aap-netlab-images-<account>/images/

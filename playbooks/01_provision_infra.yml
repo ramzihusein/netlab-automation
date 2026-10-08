@@ -22,7 +22,11 @@
     - ../vars/netlab.yml
 
   vars:
-    lab_instance_type: m6i.2xlarge
+    # 8th-gen Intel (c8i/m8i/r8i) supports nested virtualization, which the
+    # c8000v (a VM inside its container) needs. Other types: cEOS/IOL only.
+    lab_instance_type: m8i.2xlarge
+    lab_nested_virt: "{{ lab_instance_type is search('^[cmr]8i') }}"
+    lab_replace: false               # true = terminate a lab host of another type and relaunch
     lab_volume_gb: 100
     netbox_instance_type: t3.large
     netbox_volume_gb: 40
@@ -87,10 +91,48 @@
       ansible.builtin.set_fact:
         ubuntu_ami_id: "{{ lookup('amazon.aws.ssm_parameter', ubuntu_ami_param, region=aws_region) }}"
 
+    - name: Find existing lab host
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+        filters:
+          "tag:Name": netlab-lab-host
+          "tag:Project": "{{ netlab_tag }}"
+          instance-state-name: [pending, running, stopping, stopped]
+      register: existing_lab
+
+    - name: Refuse to silently keep a lab host of the wrong type
+      ansible.builtin.assert:
+        that: lab_replace | bool or existing_lab.instances | length == 0
+              or existing_lab.instances[0].instance_type == lab_instance_type
+        fail_msg: >-
+          Lab host {{ existing_lab.instances[0].instance_id | default('') }} is
+          {{ existing_lab.instances[0].instance_type | default('') }}, wanted {{ lab_instance_type }}.
+          Rerun with lab_replace=true to terminate and relaunch it (lab state lives in NetBox).
+
+    - name: Terminate lab host of the wrong type
+      amazon.aws.ec2_instance:
+        region: "{{ aws_region }}"
+        instance_ids: "{{ existing_lab.instances | map(attribute='instance_id') | list }}"
+        state: terminated
+        wait: true
+      when:
+        - lab_replace | bool
+        - existing_lab.instances | length > 0
+        - existing_lab.instances[0].instance_type != lab_instance_type
+
+    - name: Ensure nested-virtualization launch template
+      ansible.builtin.command: >-
+        {{ ansible_playbook_python }} {{ playbook_dir }}/../scripts/netlab_aws.py nested-template
+        --region {{ aws_region }} --name netlab-nested-virt
+      register: nested_tpl
+      changed_when: (nested_tpl.stdout | from_json).changed
+      when: lab_nested_virt | bool
+
     - name: Launch containerlab host
       amazon.aws.ec2_instance:
         name: netlab-lab-host
         region: "{{ aws_region }}"
+        launch_template: "{{ {'name': 'netlab-nested-virt'} if lab_nested_virt | bool else omit }}"
         instance_type: "{{ lab_instance_type }}"
         image_id: "{{ ubuntu_ami_id }}"
         key_name: "{{ key_pair_name }}"
@@ -177,7 +219,7 @@
         host: "{{ item }}"
         port: 22
         delay: 10
-        timeout: 300
+        timeout: 600
       loop:
         - "{{ lab_host.private_ip_address }}"
         - "{{ netbox_host.private_ip_address }}"

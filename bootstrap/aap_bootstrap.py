@@ -262,7 +262,7 @@ def job_templates(org_id, proj, ee_id, inv, creds):
     pv = {k: PROVISION_VARS[k] for k in ("vpc_id", "route_table_id", "route53_zone_id")}
     specs = [
         ("NetLab - Provision Infra", "playbooks/01_provision_infra.yml", "local", ["aws"],
-         {"extra_vars": yaml_vars(PROVISION_VARS)}),
+         {"extra_vars": yaml_vars(PROVISION_VARS), "ask_variables_on_launch": True}),
         ("NetLab - Configure Lab Host", "playbooks/02_configure_lab_host.yml", "infra", ["aws", "ssh"], {}),
         ("NetLab - Deploy Lab", "playbooks/03_deploy_lab.yml", "infra", ["ssh"],
          {"ask_variables_on_launch": True}),

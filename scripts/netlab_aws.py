@@ -16,11 +16,20 @@ so the lab host can fetch them without an instance profile:
   netlab_aws.py presign --region R --bucket B [--prefix images/] [--expires 3600]
 
   -> prints [{"key", "name", "size", "url"}, ...]
+
+Ensure a launch template that enables nested virtualization (KVM inside the
+VM, needed for c8000v). Supported on 8th-gen Intel types (c8i/m8i/r8i):
+
+  netlab_aws.py nested-template --region R --name N
+
+  -> prints {"changed": bool, "name": N}
 """
 import argparse
 import json
 
 import boto3
+import botocore
+from botocore.exceptions import ClientError
 
 
 def presign(a):
@@ -37,9 +46,34 @@ def presign(a):
     print(json.dumps(out))
 
 
+def nested_template(a):
+    ec2 = boto3.client("ec2", region_name=a.region)
+    members = ec2.meta.service_model.shape_for("LaunchTemplateCpuOptionsRequest").members
+    if "NestedVirtualization" not in members:
+        raise SystemExit(f"botocore {botocore.__version__} predates EC2 nested virtualization; "
+                         "use a newer execution environment")
+    data = {"CpuOptions": {"NestedVirtualization": "enabled"}}
+    try:
+        current = ec2.describe_launch_template_versions(
+            LaunchTemplateName=a.name, Versions=["$Latest"])["LaunchTemplateVersions"][0]
+    except ClientError as e:
+        if "NotFound" not in e.response["Error"]["Code"]:
+            raise
+        ec2.create_launch_template(LaunchTemplateName=a.name, LaunchTemplateData=data,
+                                   TagSpecifications=[{"ResourceType": "launch-template",
+                                                       "Tags": [{"Key": "Project", "Value": "netlab"}]}])
+        return print(json.dumps({"changed": True, "name": a.name}))
+    if current["LaunchTemplateData"].get("CpuOptions", {}).get("NestedVirtualization") == "enabled":
+        return print(json.dumps({"changed": False, "name": a.name}))
+    ver = ec2.create_launch_template_version(LaunchTemplateName=a.name, LaunchTemplateData=data)
+    ec2.modify_launch_template(LaunchTemplateName=a.name,
+                               DefaultVersion=str(ver["LaunchTemplateVersion"]["VersionNumber"]))
+    print(json.dumps({"changed": True, "name": a.name}))
+
+
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("action", choices=["enable", "disable", "presign"])
+    p.add_argument("action", choices=["enable", "disable", "presign", "nested-template"])
     p.add_argument("--region", required=True)
     p.add_argument("--route-table-id")
     p.add_argument("--cidr")
@@ -47,8 +81,11 @@ def main():
     p.add_argument("--bucket")
     p.add_argument("--prefix", default="images/")
     p.add_argument("--expires", type=int, default=3600)
+    p.add_argument("--name", default="netlab-nested-virt")
     a = p.parse_args()
 
+    if a.action == "nested-template":
+        return nested_template(a)
     if a.action == "presign":
         if not a.bucket:
             p.error("--bucket is required for presign")
