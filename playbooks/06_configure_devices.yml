@@ -17,6 +17,9 @@
   vars:
     ansible_connection: ansible.netcommon.network_cli
     ansible_network_os: "{{ 'arista.eos.eos' if (platforms | first) == 'eos' else 'cisco.ios.ios' }}"
+    # The EOS cliconf plugin needs 'enable' before config mode (no enable secret on cEOS).
+    ansible_become: "{{ (platforms | first) == 'eos' }}"
+    ansible_become_method: ansible.netcommon.enable
 
   tasks:
 
