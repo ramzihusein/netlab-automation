@@ -50,8 +50,18 @@ def nested_template(a):
     ec2 = boto3.client("ec2", region_name=a.region)
     members = ec2.meta.service_model.shape_for("LaunchTemplateCpuOptionsRequest").members
     if "NestedVirtualization" not in members:
-        raise SystemExit(f"botocore {botocore.__version__} predates EC2 nested virtualization; "
-                         "use a newer execution environment")
+        # Old botocore (e.g. the AAP 2.6 supported EE) can neither set nor read
+        # the flag. Accept a template created out of band; otherwise explain.
+        names = [t["LaunchTemplateName"] for t in ec2.describe_launch_templates(
+            Filters=[{"Name": "launch-template-name", "Values": [a.name]}])["LaunchTemplates"]]
+        if names:
+            return print(json.dumps({"changed": False, "name": a.name, "verified": False}))
+        raise SystemExit(
+            f"botocore {botocore.__version__} predates EC2 nested virtualization. Create the "
+            f"launch template once with a current AWS CLI, then rerun:\n"
+            f"  aws ec2 create-launch-template --region {a.region} --launch-template-name {a.name} "
+            f"--launch-template-data '{{\"CpuOptions\":{{\"NestedVirtualization\":\"enabled\"}}}}' "
+            f"--tag-specifications 'ResourceType=launch-template,Tags=[{{Key=Project,Value=netlab}}]'")
     data = {"CpuOptions": {"NestedVirtualization": "enabled"}}
     try:
         current = ec2.describe_launch_template_versions(

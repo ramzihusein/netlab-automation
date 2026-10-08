@@ -53,6 +53,16 @@ EC2 nested virtualization enabled (8th-gen Intel c8i/m8i/r8i only), which costs
 about a tenth of a `.metal` instance. To change the type, rerun **Provision
 Infra** with `lab_instance_type=<type> lab_replace=true`.
 
+The AAP 2.6 supported EE ships botocore 1.34, which predates the nested
+virtualization API, so create the launch template once with a current AWS CLI
+(Provision Infra prints this command if it's missing):
+
+```bash
+aws ec2 create-launch-template --region us-east-2 --launch-template-name netlab-nested-virt \
+  --launch-template-data '{"CpuOptions":{"NestedVirtualization":"enabled"}}' \
+  --tag-specifications 'ResourceType=launch-template,Tags=[{Key=Project,Value=netlab}]'
+```
+
 ```bash
 aws s3 cp cEOS64-lab-4.xx.tar.xz            s3://aap-netlab-images-<account>/images/
 aws s3 cp x86_64_crb_linux-adventerprisek9-ms.iol s3://aap-netlab-images-<account>/images/
