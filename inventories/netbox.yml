@@ -10,6 +10,5 @@ device_query_filters:
   - tag: netlab
 group_by:
   - platforms
-compose:
-  ansible_connection: "'ansible.netcommon.network_cli'"
-  ansible_network_os: "'arista.eos.eos' if (platforms | first) == 'eos' else 'cisco.ios.ios'"
+# ansible_connection / ansible_network_os are set in 06_configure_devices.yml
+# from the NetBox platform (eos / ios).

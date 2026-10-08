@@ -12,6 +12,12 @@
   hosts: all
   gather_facts: false
 
+  # Derived from the NetBox platform here rather than via inventory 'compose',
+  # which the AAP inventory import doesn't persist.
+  vars:
+    ansible_connection: ansible.netcommon.network_cli
+    ansible_network_os: "{{ 'arista.eos.eos' if (platforms | first) == 'eos' else 'cisco.ios.ios' }}"
+
   tasks:
 
     - name: Select managed interfaces from NetBox
