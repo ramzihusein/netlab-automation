@@ -1,0 +1,92 @@
+---
+# Shared settings for every NetLab playbook.
+# Account-specific values (VPC, subnet, key pair, ...) are set as extra_vars on
+# the AAP job templates, not here.
+
+aws_region: us-east-2
+netlab_tag: netlab
+dns_zone: aap.ramzidev.com
+
+# ---------------------------------------------------------------------------
+# Containerlab management network
+# Routed from the VPC to the lab host (VPC route -> lab host ENI), so it must
+# not overlap the VPC CIDR (10.0.0.0/16).
+# ---------------------------------------------------------------------------
+lab_name: netlab
+lab_mgmt_network: netlab-mgmt
+lab_mgmt_bridge: br-netlab
+lab_mgmt_subnet: 172.20.20.0/24
+lab_mgmt_gateway: 172.20.20.1
+lab_mgmt_prefixlen: 24
+
+lab_dir: /opt/netlab
+lab_image_dir: /opt/netlab/images
+lab_state_file: /opt/netlab/images.json
+lab_topology_file: /opt/netlab/topology.clab.yml
+
+# Default credentials baked into the containerlab cEOS / IOL / c8000v images.
+# The management network is only reachable from inside the VPC.
+lab_device_username: admin
+
+# ---------------------------------------------------------------------------
+# Supported containerlab kinds. Topology endpoints are always ethN; NetBox and
+# the devices use the NOS name: iface_prefix ~ (N + iface_offset).
+# ---------------------------------------------------------------------------
+os_kinds:
+  arista_ceos:
+    os: eos
+    image: ceos:netlab
+    manufacturer: Arista
+    device_type: cEOS-lab
+    mgmt_iface: Management0
+    iface_prefix: Ethernet
+    iface_offset: 0
+  cisco_iol:
+    os: ios
+    image: cisco_iol:netlab
+    manufacturer: Cisco
+    device_type: IOL
+    mgmt_iface: Ethernet0/0
+    iface_prefix: Ethernet0/
+    iface_offset: 0
+  cisco_c8000v:
+    os: ios
+    image: cisco_c8000v:netlab
+    manufacturer: Cisco
+    device_type: Catalyst 8000V
+    mgmt_iface: GigabitEthernet1
+    iface_prefix: GigabitEthernet
+    iface_offset: 1
+
+# ---------------------------------------------------------------------------
+# Seed topology. NetBox is populated from this once; after that NetBox is the
+# source of truth and edits there are pushed to the devices by EDA.
+# Nodes whose OS has no image on the lab host are skipped (with their links).
+# ---------------------------------------------------------------------------
+lab_nodes:
+  - name: eos-spine1
+    os: eos
+    role: spine
+    mgmt_ip: 172.20.20.11
+    loopback: 192.168.255.1/32
+  - name: ios-spine2
+    os: ios
+    role: spine
+    mgmt_ip: 172.20.20.12
+    loopback: 192.168.255.2/32
+  - name: eos-leaf1
+    os: eos
+    role: leaf
+    mgmt_ip: 172.20.20.21
+    loopback: 192.168.255.11/32
+  - name: ios-leaf2
+    os: ios
+    role: leaf
+    mgmt_ip: 172.20.20.22
+    loopback: 192.168.255.12/32
+
+lab_links:
+  - {a: eos-spine1, a_port: 1, a_ip: 192.168.254.0/31, b: eos-leaf1, b_port: 1, b_ip: 192.168.254.1/31}
+  - {a: eos-spine1, a_port: 2, a_ip: 192.168.254.2/31, b: ios-leaf2, b_port: 1, b_ip: 192.168.254.3/31}
+  - {a: ios-spine2, a_port: 1, a_ip: 192.168.254.4/31, b: eos-leaf1, b_port: 2, b_ip: 192.168.254.5/31}
+  - {a: ios-spine2, a_port: 2, a_ip: 192.168.254.6/31, b: ios-leaf2, b_port: 2, b_ip: 192.168.254.7/31}

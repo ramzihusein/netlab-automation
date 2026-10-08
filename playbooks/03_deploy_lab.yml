@@ -1,0 +1,84 @@
+---
+# Job Template: NetLab - Deploy Lab
+# Purpose: Renders the containerlab topology from vars/netlab.yml (only nodes
+#          with an available image) and deploys it, then proves the device
+#          management IPs are reachable from the AAP execution node.
+#
+# Optional:
+#   lab_reconfigure: true   wipe and redeploy all nodes (device config is
+#                           restored afterwards by "Configure Devices")
+
+- name: NetLab — deploy containerlab topology
+  hosts: role_labhost
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../vars/netlab.yml
+
+  vars:
+    lab_reconfigure: false
+
+  tasks:
+
+    - name: Load lab image state
+      ansible.builtin.include_tasks: tasks/lab_state.yml
+
+    - name: Render topology
+      ansible.builtin.template:
+        src: templates/topology.clab.yml.j2
+        dest: "{{ lab_topology_file }}"
+        mode: "0644"
+      register: topology
+
+    - name: Inspect running lab
+      ansible.builtin.command: containerlab inspect -t {{ lab_topology_file }} --format json
+      register: inspect
+      changed_when: false
+      failed_when: false
+
+    # containerlab >= 0.68 keys the output by lab name; older versions use "containers".
+    - name: Count running nodes
+      ansible.builtin.set_fact:
+        running_nodes: >-
+          {% if inspect.rc == 0 and inspect.stdout | length > 0 %}
+          {% set j = inspect.stdout | from_json %}
+          {{ j[lab_name] | default(j.containers | default([])) | selectattr('state', 'equalto', 'running') | list | length }}
+          {% else %}0{% endif %}
+
+    - name: Deploy lab
+      ansible.builtin.command: >-
+        containerlab deploy -t {{ lab_topology_file }}
+        {{ '--reconfigure' if (lab_reconfigure | bool or topology.changed) else '' }}
+      args:
+        chdir: "{{ lab_dir }}"
+      when: >-
+        lab_reconfigure | bool or topology.changed
+        or (running_nodes | int) < (lab_active_nodes | length)
+
+
+- name: NetLab — verify device reachability from AAP
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../vars/netlab.yml
+
+  vars:
+    lab_active_nodes: "{{ hostvars[groups['role_labhost'][0]].lab_active_nodes }}"
+
+  tasks:
+
+    - name: Wait for SSH on each device mgmt IP (routed via the lab host)
+      ansible.builtin.wait_for:
+        host: "{{ item.mgmt_ip }}"
+        port: 22
+        timeout: "{{ 1200 if item.kind == 'cisco_c8000v' else 600 }}"
+      loop: "{{ lab_active_nodes }}"
+      loop_control:
+        label: "{{ item.name }} {{ item.mgmt_ip }} ({{ item.kind }})"
+
+    - name: Print lab summary
+      ansible.builtin.debug:
+        msg: "{{ lab_active_nodes | map(attribute='name') | zip(lab_active_nodes | map(attribute='mgmt_ip')) | map('join', ' -> ') | list }}"

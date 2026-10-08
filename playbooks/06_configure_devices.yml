@@ -1,0 +1,39 @@
+---
+# Job Template: NetLab - Configure Devices
+# Purpose: Pushes NetBox intent to the lab devices: hostname plus, for every
+#          non-mgmt interface in NetBox, description, enabled state and IPv4
+#          addresses. Interfaces are 'replaced', so removing an IP or editing a
+#          description in NetBox is reflected on the device.
+#
+# Inventory: "NetLab Devices" (NetBox, update on launch).
+# EDA launches this with limit=<device> when NetBox sends a change webhook.
+
+- name: NetLab — push NetBox intent to devices
+  hosts: all
+  gather_facts: false
+
+  tasks:
+
+    - name: Select managed interfaces from NetBox
+      ansible.builtin.set_fact:
+        nb_ifaces: "{{ interfaces | default([]) | rejectattr('mgmt_only') | list }}"
+
+    - name: Build per-interface IPv4 lists
+      ansible.builtin.set_fact:
+        nb_l3: >-
+          {{ nb_l3 | default([]) + [{
+               'name': item.name,
+               'ipv4': item.ip_addresses | default([])
+                       | selectattr('family.value', 'equalto', 4) | map(attribute='address')
+                       | map('regex_replace', '^', '{"address": "') | map('regex_replace', '$', '"}') | map('from_json') | list
+             }] }}
+      loop: "{{ nb_ifaces }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Configure device for its platform
+      ansible.builtin.include_tasks: "tasks/configure_{{ platforms | first }}.yml"
+
+    - name: Print device summary
+      ansible.builtin.debug:
+        msg: "{{ nb_l3 | map(attribute='name') | zip(nb_l3 | map(attribute='ipv4')) | list }}"

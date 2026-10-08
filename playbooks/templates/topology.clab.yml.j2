@@ -1,0 +1,29 @@
+# {{ ansible_managed }}
+name: {{ lab_name }}
+
+mgmt:
+  network: {{ lab_mgmt_network }}
+  bridge: {{ lab_mgmt_bridge }}
+  ipv4-subnet: {{ lab_mgmt_subnet }}
+  ipv4-gw: {{ lab_mgmt_gateway }}
+
+topology:
+  kinds:
+{% for kind in lab_active_nodes | map(attribute='kind') | unique %}
+    {{ kind }}:
+      image: {{ os_kinds[kind].image }}
+{% endfor %}
+
+  nodes:
+{% for n in lab_active_nodes %}
+    {{ n.name }}:
+      kind: {{ n.kind }}
+      mgmt-ipv4: {{ n.mgmt_ip }}
+      labels:
+        role: {{ n.role }}
+{% endfor %}
+
+  links:
+{% for l in lab_active_links %}
+    - endpoints: ["{{ l.a }}:eth{{ l.a_port }}", "{{ l.b }}:eth{{ l.b_port }}"]
+{% endfor %}

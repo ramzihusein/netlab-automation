@@ -1,0 +1,35 @@
+---
+# Arista EOS (cEOS). Inputs: nb_ifaces, nb_l3 from 06_configure_devices.yml
+
+- name: Hostname and routing
+  arista.eos.eos_config:
+    lines:
+      - "hostname {{ inventory_hostname }}"
+      - ip routing
+
+- name: Build EOS interface config
+  ansible.builtin.set_fact:
+    eos_ifaces: >-
+      {{ eos_ifaces | default([]) + [
+           {'name': item.name, 'enabled': item.enabled}
+           | combine({'description': item.description} if item.description else {})
+           | combine({'mode': 'layer3'} if item.name.startswith('Ethernet') else {})
+         ] }}
+  loop: "{{ nb_ifaces }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Interface descriptions, state and routed mode
+  arista.eos.eos_interfaces:
+    config: "{{ eos_ifaces }}"
+    state: replaced
+
+- name: Interface IPv4 addresses
+  arista.eos.eos_l3_interfaces:
+    config: "{{ nb_l3 }}"
+    state: replaced
+
+- name: Save configuration
+  arista.eos.eos_command:
+    commands: write memory
+  changed_when: false

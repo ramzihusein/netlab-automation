@@ -1,0 +1,7 @@
+*.retry
+__pycache__/
+.secrets*
+*.tar.xz
+*.qcow2
+*.iol
+*.bin

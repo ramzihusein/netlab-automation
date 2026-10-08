@@ -1,0 +1,321 @@
+---
+# Job Template: NetLab - Configure Lab Host
+# Purpose: Turns the lab EC2 instance into a containerlab host whose device
+#          management IPs are reachable from the rest of the VPC, and builds
+#          the NOS container images found in the S3 image bucket.
+#
+#   s3://<netlab_images_bucket>/images/
+#     cEOS64-lab-<ver>.tar.xz                 -> ceos:netlab           (arista_ceos)
+#     *iol*.bin | *.iol  (L3, not L2)         -> cisco_iol:netlab      (cisco_iol)
+#     c8000v-*.qcow2  (needs /dev/kvm)        -> cisco_c8000v:netlab   (cisco_c8000v)
+#
+# Writes {{ lab_state_file }} with the kinds that are usable; later playbooks
+# only deploy nodes whose OS has an image.
+
+- name: NetLab lab host — locate NOS images in S3
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../vars/netlab.yml
+
+  tasks:
+
+    - name: Get AWS account ID
+      amazon.aws.aws_caller_info:
+      register: caller
+
+    - name: Presign image downloads
+      ansible.builtin.command: >-
+        {{ ansible_playbook_python }} {{ playbook_dir }}/../scripts/netlab_aws.py presign
+        --region {{ aws_region }}
+        --bucket {{ netlab_images_bucket | default('aap-netlab-images-' ~ caller.account) }}
+      register: presign
+      changed_when: false
+      no_log: true
+
+    - name: Record image list
+      ansible.builtin.set_fact:
+        lab_images: "{{ presign.stdout | from_json }}"
+        netlab_images_bucket: "{{ netlab_images_bucket | default('aap-netlab-images-' ~ caller.account) }}"
+      no_log: true
+
+    - name: Show images found
+      ansible.builtin.debug:
+        msg: "{{ lab_images | map(attribute='key') | list or 'No images in s3://' ~ netlab_images_bucket ~ '/images/' }}"
+
+
+- name: NetLab lab host — Docker, containerlab, routed mgmt network, NOS images
+  hosts: role_labhost
+  become: true
+
+  vars_files:
+    - ../vars/netlab.yml
+
+  vars:
+    containerlab_version: ""          # empty = latest
+    vrnetlab_version: master
+    vrnetlab_dir: "{{ lab_dir }}/vrnetlab"
+    iol_version: "17.12.01"           # only used to name the vrnetlab build input
+    ios_kind_preference: [cisco_iol, cisco_c8000v]
+    lab_images: "{{ hostvars['localhost'].lab_images }}"
+    image_names: "{{ lab_images | map(attribute='name') | list }}"
+    uplink: "{{ ansible_default_ipv4.interface }}"
+
+  tasks:
+
+    - name: Install Docker
+      ansible.builtin.include_tasks: tasks/docker.yml
+
+    - name: Read Docker version
+      ansible.builtin.command: docker version --format json
+      register: docker_version
+      changed_when: false
+
+    - name: Require Docker 28+ (bridge gateway_mode_ipv4=nat-unprotected)
+      ansible.builtin.assert:
+        that: (docker_version.stdout | from_json).Server.Version is version('28.0', '>=')
+        fail_msg: >-
+          Docker {{ (docker_version.stdout | from_json).Server.Version }} blocks direct routing to
+          container IPs and lacks nat-unprotected; upgrade Docker.
+
+    - name: Install containerlab
+      ansible.builtin.shell: >-
+        bash -c "$(curl -sL https://get.containerlab.dev)"
+        {{ ('-- -v ' ~ containerlab_version) if containerlab_version else '' }}
+      args:
+        creates: /usr/bin/containerlab
+
+    - name: Enable IPv4 forwarding
+      ansible.posix.sysctl:
+        name: net.ipv4.ip_forward
+        value: "1"
+        sysctl_set: true
+
+    # Docker 28+ drops packets to container IPs that arrive from outside the
+    # bridge. nat-unprotected keeps outbound NAT for the devices but lets the
+    # VPC (via the route to this host) reach their mgmt IPs directly.
+    - name: Check for the containerlab mgmt network
+      ansible.builtin.command: docker network inspect {{ lab_mgmt_network }}
+      register: mgmt_net
+      changed_when: false
+      failed_when: false
+
+    - name: Create routable containerlab mgmt network
+      ansible.builtin.command: >-
+        docker network create --driver bridge
+        --subnet {{ lab_mgmt_subnet }} --gateway {{ lab_mgmt_gateway }}
+        -o com.docker.network.bridge.name={{ lab_mgmt_bridge }}
+        -o com.docker.network.bridge.gateway_mode_ipv4=nat-unprotected
+        {{ lab_mgmt_network }}
+      when: mgmt_net.rc != 0
+
+    - name: Install forwarding rules script
+      ansible.builtin.copy:
+        dest: /usr/local/sbin/netlab-forward.sh
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          # Allow VPC <-> containerlab mgmt bridge forwarding. DOCKER-USER is
+          # left alone by Docker, so these survive Docker restarts.
+          set -e
+          for rule in "-i {{ uplink }} -o {{ lab_mgmt_bridge }} -j ACCEPT" \
+                      "-i {{ lab_mgmt_bridge }} -o {{ uplink }} -j ACCEPT"; do
+            iptables -C DOCKER-USER $rule 2>/dev/null || iptables -I DOCKER-USER $rule
+          done
+      register: fwd_script
+
+    - name: Install forwarding rules unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/netlab-forward.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Allow VPC traffic to the containerlab mgmt bridge
+          After=docker.service
+          Requires=docker.service
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=true
+          ExecStart=/usr/local/sbin/netlab-forward.sh
+
+          [Install]
+          WantedBy=multi-user.target
+      register: fwd_unit
+
+    - name: Apply forwarding rules
+      ansible.builtin.systemd_service:
+        name: netlab-forward
+        enabled: true
+        state: "{{ 'restarted' if (fwd_script.changed or fwd_unit.changed) else 'started' }}"
+        daemon_reload: true
+
+    # ---------------------------------------------------------------- images
+
+    - name: Create image directory
+      ansible.builtin.file:
+        path: "{{ lab_image_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Download NOS images from S3
+      ansible.builtin.get_url:
+        url: "{{ item.url }}"
+        dest: "{{ lab_image_dir }}/{{ item.name }}"
+        mode: "0644"
+        timeout: 900
+      loop: "{{ lab_images }}"
+      loop_control:
+        label: "{{ item.name }} ({{ (item.size / 1048576) | round | int }} MB)"
+
+    - name: Classify images
+      ansible.builtin.set_fact:
+        ceos_file: >-
+          {{ image_names | select('search', '(?i)ceos.*[.]tar([.]xz)?$') | first | default('') }}
+        iol_file: >-
+          {{ image_names | select('search', '(?i)iol') | select('search', '(?i)[.](iol|bin)$')
+             | reject('search', '(?i)l2') | first | default('') }}
+        c8000v_file: >-
+          {{ image_names | select('search', '(?i)c8000v.*[.]qcow2$') | first | default('') }}
+
+    - name: Check for KVM (required for c8000v)
+      ansible.builtin.stat:
+        path: /dev/kvm
+      register: kvm
+
+    - name: Read previous image state
+      ansible.builtin.slurp:
+        src: "{{ lab_state_file }}"
+      register: prev_state_raw
+      failed_when: false
+
+    - name: Parse previous image state
+      ansible.builtin.set_fact:
+        prev_state: "{{ (prev_state_raw.content | b64decode | from_json) if prev_state_raw.content is defined else {} }}"
+
+    - name: Check existing images
+      ansible.builtin.command: docker image inspect {{ os_kinds[item].image }}
+      loop: [arista_ceos, cisco_iol, cisco_c8000v]
+      register: img_before
+      changed_when: false
+      failed_when: false
+
+    - name: Import cEOS image
+      ansible.builtin.command: docker import {{ lab_image_dir }}/{{ ceos_file }} {{ os_kinds.arista_ceos.image }}
+      when:
+        - ceos_file | length > 0
+        - img_before.results[0].rc != 0 or prev_state.ceos_source | default('') != ceos_file
+
+    - name: Fetch vrnetlab (packages Cisco images as containers)
+      ansible.builtin.git:
+        repo: https://github.com/srl-labs/vrnetlab.git
+        dest: "{{ vrnetlab_dir }}"
+        version: "{{ vrnetlab_version }}"
+        force: false
+      when: iol_file | length > 0 or (c8000v_file | length > 0 and kvm.stat.exists)
+
+    - name: Build IOL image
+      when:
+        - iol_file | length > 0
+        - img_before.results[1].rc != 0 or prev_state.iol_source | default('') != iol_file
+      block:
+        - name: Stage IOL binary for vrnetlab
+          ansible.builtin.copy:
+            src: "{{ lab_image_dir }}/{{ iol_file }}"
+            dest: "{{ vrnetlab_dir }}/cisco/iol/cisco_iol-{{ iol_version }}.bin"
+            remote_src: true
+            mode: "0644"
+
+        - name: Build vrnetlab IOL image
+          ansible.builtin.command: make docker-image
+          args:
+            chdir: "{{ vrnetlab_dir }}/cisco/iol"
+
+        - name: List built images
+          ansible.builtin.command: docker images --format json
+          register: built
+          changed_when: false
+
+        - name: Tag IOL image
+          ansible.builtin.command: >-
+            docker tag
+            {{ (built.stdout_lines | map('from_json')
+                | selectattr('Repository', 'search', 'cisco_iol')
+                | rejectattr('Tag', 'search', '^L2') | first).ID }}
+            {{ os_kinds.cisco_iol.image }}
+
+    - name: Build c8000v image
+      when:
+        - c8000v_file | length > 0
+        - kvm.stat.exists
+        - img_before.results[2].rc != 0 or prev_state.c8000v_source | default('') != c8000v_file
+      block:
+        - name: Stage c8000v qcow2 for vrnetlab
+          ansible.builtin.copy:
+            src: "{{ lab_image_dir }}/{{ c8000v_file }}"
+            dest: "{{ vrnetlab_dir }}/cisco/c8000v/{{ c8000v_file }}"
+            remote_src: true
+            mode: "0644"
+
+        - name: Build vrnetlab c8000v image (boots the VM once; slow)
+          ansible.builtin.command: make docker-image
+          args:
+            chdir: "{{ vrnetlab_dir }}/cisco/c8000v"
+          async: 3600
+          poll: 30
+
+        - name: List built images
+          ansible.builtin.command: docker images --format json
+          register: built
+          changed_when: false
+
+        - name: Tag c8000v image
+          ansible.builtin.command: >-
+            docker tag
+            {{ (built.stdout_lines | map('from_json')
+                | selectattr('Repository', 'search', 'c8000v') | first).ID }}
+            {{ os_kinds.cisco_c8000v.image }}
+
+    - name: Check final images
+      ansible.builtin.command: docker image inspect {{ os_kinds[item].image }}
+      loop: [arista_ceos, cisco_iol, cisco_c8000v]
+      register: img_after
+      changed_when: false
+      failed_when: false
+
+    - name: Decide which kinds the lab uses
+      ansible.builtin.set_fact:
+        lab_state:
+          eos_kind: "{{ 'arista_ceos' if img_after.results[0].rc == 0 else '' }}"
+          ios_kind: >-
+            {{ (ios_kind_preference
+                | select('in', ([] + (['cisco_iol'] if img_after.results[1].rc == 0 else [])
+                                   + (['cisco_c8000v'] if img_after.results[2].rc == 0 and kvm.stat.exists else [])))
+                | first) | default('') }}
+          ceos_source: "{{ ceos_file }}"
+          iol_source: "{{ iol_file }}"
+          c8000v_source: "{{ c8000v_file }}"
+          kvm: "{{ kvm.stat.exists }}"
+
+    - name: Write lab image state
+      ansible.builtin.copy:
+        dest: "{{ lab_state_file }}"
+        content: "{{ lab_state | to_nice_json }}"
+        mode: "0644"
+
+    - name: Require at least one NOS image
+      ansible.builtin.assert:
+        that: (lab_state.eos_kind | length > 0) or (lab_state.ios_kind | length > 0)
+        fail_msg: >-
+          No usable NOS image. Upload cEOS (cEOS64-lab-*.tar.xz) and/or Cisco IOL (*.iol / *iol*.bin)
+          to s3://{{ hostvars['localhost'].netlab_images_bucket }}/images/ and rerun.
+          c8000v (*.qcow2) additionally needs a KVM-capable instance type.
+
+    - name: Print lab host summary
+      ansible.builtin.debug:
+        msg:
+          - "Arista: {{ lab_state.eos_kind or 'no image' }}"
+          - "Cisco:  {{ lab_state.ios_kind or 'no image' }}{{ '' if kvm.stat.exists else '  (no /dev/kvm: c8000v unavailable)' }}"
+          - "Mgmt:   {{ lab_mgmt_subnet }} on {{ lab_mgmt_bridge }} (routed from VPC via {{ uplink }})"

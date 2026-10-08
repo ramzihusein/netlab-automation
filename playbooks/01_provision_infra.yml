@@ -1,0 +1,198 @@
+---
+# Job Template: NetLab - Provision Infra
+# Purpose: Creates the AWS pieces for the network lab inside the existing AAP VPC:
+#            - S3 bucket for NOS images (cEOS / IOL / c8000v)
+#            - netlab-sg (lab host) and netbox-sg security groups
+#            - lab host (containerlab) and NetBox EC2 instances (Ubuntu 24.04)
+#            - VPC route for the containerlab mgmt subnet -> lab host
+#            - Route53 records (public for people, -int for AAP/EDA)
+#
+# Required AAP Variables (set in Job Template):
+#   vpc_id, subnet_id, route_table_id, key_pair_name
+#   aap_security_group_ids:  SGs of AAP controller/exec/EDA nodes
+#   route53_zone_id:         hosted zone for {{ dns_zone }}
+#   admin_cidrs:             CIDRs allowed to SSH / browse NetBox from outside
+
+- name: NetLab provisioning — AWS infrastructure
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../vars/netlab.yml
+
+  vars:
+    lab_instance_type: m6i.2xlarge
+    lab_volume_gb: 100
+    netbox_instance_type: t3.large
+    netbox_volume_gb: 40
+    ubuntu_ami_param: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+    common_tags:
+      Project: "{{ netlab_tag }}"
+      ManagedBy: ansible
+
+  tasks:
+
+    - name: Get AWS account ID
+      amazon.aws.aws_caller_info:
+      register: caller
+
+    - name: Set image bucket name
+      ansible.builtin.set_fact:
+        netlab_images_bucket: "{{ netlab_images_bucket | default('aap-netlab-images-' ~ caller.account) }}"
+
+    - name: Create private S3 bucket for NOS images
+      amazon.aws.s3_bucket:
+        name: "{{ netlab_images_bucket }}"
+        region: "{{ aws_region }}"
+        encryption: AES256
+        public_access:
+          block_public_acls: true
+          ignore_public_acls: true
+          block_public_policy: true
+          restrict_public_buckets: true
+        tags: "{{ common_tags }}"
+        state: present
+
+    - name: Create NetBox security group
+      amazon.aws.ec2_security_group:
+        name: netbox-sg
+        description: NetBox for the NetLab demo
+        vpc_id: "{{ vpc_id }}"
+        region: "{{ aws_region }}"
+        rules: >-
+          {{
+            [{'proto': 'tcp', 'ports': [22, 8000], 'cidr_ip': admin_cidrs, 'rule_desc': 'admin'}]
+            + (aap_security_group_ids | map('regex_replace', '^', '{"proto": "tcp", "ports": [22, 8000], "rule_desc": "AAP", "group_id": "') | map('regex_replace', '$', '"}') | map('from_json') | list)
+          }}
+        tags: "{{ common_tags | combine({'Name': 'netbox-sg'}) }}"
+      register: netbox_sg
+
+    - name: Create lab host security group
+      amazon.aws.ec2_security_group:
+        name: netlab-sg
+        description: Containerlab host for the NetLab demo (devices are routed behind it)
+        vpc_id: "{{ vpc_id }}"
+        region: "{{ aws_region }}"
+        rules: >-
+          {{
+            [{'proto': 'tcp', 'ports': [22], 'cidr_ip': admin_cidrs, 'rule_desc': 'admin'},
+             {'proto': 'all', 'group_id': netbox_sg.group_id, 'rule_desc': 'NetBox to devices'}]
+            + (aap_security_group_ids | map('regex_replace', '^', '{"proto": "all", "rule_desc": "AAP to devices", "group_id": "') | map('regex_replace', '$', '"}') | map('from_json') | list)
+          }}
+        tags: "{{ common_tags | combine({'Name': 'netlab-sg'}) }}"
+      register: netlab_sg
+
+    - name: Look up latest Ubuntu 24.04 AMI
+      ansible.builtin.set_fact:
+        ubuntu_ami_id: "{{ lookup('amazon.aws.ssm_parameter', ubuntu_ami_param, region=aws_region) }}"
+
+    - name: Launch containerlab host
+      amazon.aws.ec2_instance:
+        name: netlab-lab-host
+        region: "{{ aws_region }}"
+        instance_type: "{{ lab_instance_type }}"
+        image_id: "{{ ubuntu_ami_id }}"
+        key_name: "{{ key_pair_name }}"
+        vpc_subnet_id: "{{ subnet_id }}"
+        security_groups: ["{{ netlab_sg.group_id }}"]
+        network:
+          assign_public_ip: true
+        volumes:
+          - device_name: /dev/sda1
+            ebs:
+              volume_size: "{{ lab_volume_gb }}"
+              volume_type: gp3
+              delete_on_termination: true
+              encrypted: true
+        tags: "{{ common_tags | combine({'Role': 'labhost'}) }}"
+        wait: true
+        state: running
+      register: lab_ec2
+
+    - name: Launch NetBox host
+      amazon.aws.ec2_instance:
+        name: netlab-netbox
+        region: "{{ aws_region }}"
+        instance_type: "{{ netbox_instance_type }}"
+        image_id: "{{ ubuntu_ami_id }}"
+        key_name: "{{ key_pair_name }}"
+        vpc_subnet_id: "{{ subnet_id }}"
+        security_groups: ["{{ netbox_sg.group_id }}"]
+        network:
+          assign_public_ip: true
+        volumes:
+          - device_name: /dev/sda1
+            ebs:
+              volume_size: "{{ netbox_volume_gb }}"
+              volume_type: gp3
+              delete_on_termination: true
+              encrypted: true
+        tags: "{{ common_tags | combine({'Role': 'netbox'}) }}"
+        wait: true
+        state: running
+      register: netbox_ec2
+
+    - name: Re-read instances to get final addresses
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+        instance_ids:
+          - "{{ lab_ec2.instances[0].instance_id }}"
+          - "{{ netbox_ec2.instances[0].instance_id }}"
+      register: netlab_instances
+
+    - name: Set instance facts
+      ansible.builtin.set_fact:
+        lab_host: "{{ netlab_instances.instances | selectattr('tags.Role', 'equalto', 'labhost') | first }}"
+        netbox_host: "{{ netlab_instances.instances | selectattr('tags.Role', 'equalto', 'netbox') | first }}"
+
+    - name: Route containerlab mgmt subnet through the lab host
+      ansible.builtin.command: >-
+        {{ ansible_playbook_python }} {{ playbook_dir }}/../scripts/netlab_aws.py enable
+        --region {{ aws_region }}
+        --route-table-id {{ route_table_id }}
+        --cidr {{ lab_mgmt_subnet }}
+        --instance-id {{ lab_host.instance_id }}
+      register: route_result
+      changed_when: (route_result.stdout | from_json).changed
+
+    - name: Publish DNS records
+      amazon.aws.route53:
+        hosted_zone_id: "{{ route53_zone_id }}"
+        record: "{{ item.record }}"
+        type: A
+        ttl: 60
+        value: "{{ item.value }}"
+        overwrite: true
+        state: present
+      loop:
+        - {record: "netlab.{{ dns_zone }}", value: "{{ lab_host.public_ip_address }}"}
+        - {record: "netbox.{{ dns_zone }}", value: "{{ netbox_host.public_ip_address }}"}
+        - {record: "netbox-int.{{ dns_zone }}", value: "{{ netbox_host.private_ip_address }}"}
+      loop_control:
+        label: "{{ item.record }}"
+
+    - name: Wait for SSH on both hosts (from the AAP execution node)
+      ansible.builtin.wait_for:
+        host: "{{ item }}"
+        port: 22
+        delay: 10
+        timeout: 300
+      loop:
+        - "{{ lab_host.private_ip_address }}"
+        - "{{ netbox_host.private_ip_address }}"
+
+    - name: Set artifact facts for downstream jobs
+      ansible.builtin.set_stats:
+        data:
+          netlab_images_bucket: "{{ netlab_images_bucket }}"
+          lab_host_ip: "{{ lab_host.private_ip_address }}"
+          netbox_host_ip: "{{ netbox_host.private_ip_address }}"
+
+    - name: Print provisioning summary
+      ansible.builtin.debug:
+        msg:
+          - "Lab host:   {{ lab_host.instance_id }}  {{ lab_host.private_ip_address }}  ssh ubuntu@netlab.{{ dns_zone }}"
+          - "NetBox:     {{ netbox_host.instance_id }}  {{ netbox_host.private_ip_address }}  http://netbox.{{ dns_zone }}:8000"
+          - "Mgmt route: {{ lab_mgmt_subnet }} -> {{ lab_host.instance_id }} ({{ route_table_id }})"
+          - "Images:     aws s3 cp <image> s3://{{ netlab_images_bucket }}/images/"

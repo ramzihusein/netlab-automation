@@ -1,0 +1,96 @@
+---
+# Job Template: NetLab - Teardown
+# Purpose: Removes everything 01_provision_infra created: mgmt route, DNS
+#          records, both instances and both security groups.
+#          The image bucket is kept unless delete_images=true.
+#
+# Required AAP Variables: route_table_id, route53_zone_id
+# Survey: confirm_teardown must equal "netlab"
+
+- name: NetLab teardown
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../vars/netlab.yml
+
+  vars:
+    confirm_teardown: ""
+    delete_images: false
+
+  tasks:
+
+    - name: Require confirmation
+      ansible.builtin.assert:
+        that: confirm_teardown == netlab_tag
+        fail_msg: Set confirm_teardown={{ netlab_tag }} to destroy the lab.
+
+    - name: Remove mgmt subnet route
+      ansible.builtin.command: >-
+        {{ ansible_playbook_python }} {{ playbook_dir }}/../scripts/netlab_aws.py disable
+        --region {{ aws_region }} --route-table-id {{ route_table_id }} --cidr {{ lab_mgmt_subnet }}
+      register: route_result
+      changed_when: (route_result.stdout | from_json).changed
+
+    - name: Read DNS records
+      amazon.aws.route53:
+        hosted_zone_id: "{{ route53_zone_id }}"
+        record: "{{ item }}"
+        type: A
+        state: get
+      loop:
+        - "netlab.{{ dns_zone }}"
+        - "netbox.{{ dns_zone }}"
+        - "netbox-int.{{ dns_zone }}"
+      register: dns
+
+    - name: Delete DNS records
+      amazon.aws.route53:
+        hosted_zone_id: "{{ route53_zone_id }}"
+        record: "{{ item.set.record }}"
+        type: A
+        ttl: "{{ item.set.ttl }}"
+        value: "{{ item.set.value }}"
+        state: absent
+      loop: "{{ dns.results | selectattr('set.record', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Terminate lab instances
+      amazon.aws.ec2_instance:
+        region: "{{ aws_region }}"
+        filters:
+          "tag:Project": "{{ netlab_tag }}"
+          instance-state-name: [pending, running, stopping, stopped]
+        state: absent
+        wait: true
+
+    - name: Delete security groups
+      amazon.aws.ec2_security_group:
+        name: "{{ item }}"
+        vpc_id: "{{ vpc_id }}"
+        region: "{{ aws_region }}"
+        state: absent
+      loop: [netlab-sg, netbox-sg]
+      register: sg_delete
+      retries: 6
+      delay: 20
+      until: sg_delete is succeeded
+
+    - name: Get AWS account ID
+      amazon.aws.aws_caller_info:
+      register: caller
+      when: delete_images | bool
+
+    - name: Delete image bucket
+      amazon.aws.s3_bucket:
+        name: "{{ netlab_images_bucket | default('aap-netlab-images-' ~ caller.account) }}"
+        region: "{{ aws_region }}"
+        force: true
+        state: absent
+      when: delete_images | bool
+
+    - name: Print teardown summary
+      ansible.builtin.debug:
+        msg: "NetLab removed{{ '' if delete_images | bool else ' (images kept in S3)' }}. NetBox data is gone with its instance."

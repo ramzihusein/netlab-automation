@@ -1,0 +1,15 @@
+---
+# AAP inventory source "NetLab Devices" (sourced from project).
+# URL and token come from the "NetBox API" credential (NETBOX_API / NETBOX_TOKEN).
+plugin: netbox.netbox.nb_inventory
+validate_certs: false
+config_context: false
+interfaces: true
+virtual_chassis_name: false
+device_query_filters:
+  - tag: netlab
+group_by:
+  - platforms
+compose:
+  ansible_connection: "'ansible.netcommon.network_cli'"
+  ansible_network_os: "'arista.eos.eos' if (platforms | first) == 'eos' else 'cisco.ios.ios'"

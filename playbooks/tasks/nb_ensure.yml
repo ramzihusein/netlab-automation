@@ -1,0 +1,51 @@
+---
+# Idempotently create or update one NetBox object over the REST API.
+# The netbox.netbox modules need pynetbox, which the supported EE doesn't ship,
+# so this uses plain uri calls.
+#
+# Input (loop_var nb):
+#   nb.endpoint  e.g. dcim/devices
+#   nb.lookup    query params that identify the object, e.g. {name: eos-leaf1}
+#   nb.body      fields to create/patch
+#   nb.update    optional (default true); false = create only, never overwrite
+#                edits people made in NetBox
+#   nb.secret    optional, hide body from logs
+# Output: nb_obj (the object as returned by NetBox)
+
+- name: "Look up {{ nb.endpoint }} {{ nb.lookup | urlencode }}"
+  ansible.builtin.uri:
+    url: "{{ netbox_url }}/api/{{ nb.endpoint }}/?{{ nb.lookup | urlencode }}"
+  register: _nb_get
+
+- name: "Create {{ nb.endpoint }} {{ nb.lookup | urlencode }}"
+  ansible.builtin.uri:
+    url: "{{ netbox_url }}/api/{{ nb.endpoint }}/"
+    method: POST
+    body: "{{ nb.body }}"
+    status_code: 201
+  register: _nb_post
+  changed_when: true
+  when: _nb_get.json.count == 0
+  no_log: "{{ nb.secret | default(false) }}"
+
+- name: "Update {{ nb.endpoint }} {{ nb.lookup | urlencode }}"
+  ansible.builtin.uri:
+    url: "{{ netbox_url }}/api/{{ nb.endpoint }}/{{ _nb_get.json.results[0].id }}/"
+    method: PATCH
+    body: "{{ nb.body }}"
+  register: _nb_patch
+  when:
+    - _nb_get.json.count == 1
+    - nb.update | default(true)
+  no_log: "{{ nb.secret | default(false) }}"
+
+- name: Fail on ambiguous lookup
+  ansible.builtin.fail:
+    msg: "{{ nb.endpoint }} lookup {{ nb.lookup }} matched {{ _nb_get.json.count }} objects"
+  when: _nb_get.json.count > 1
+
+- name: Return object
+  ansible.builtin.set_fact:
+    nb_obj: >-
+      {{ _nb_post.json if _nb_get.json.count == 0
+         else (_nb_patch.json if _nb_patch.json is defined else _nb_get.json.results[0]) }}

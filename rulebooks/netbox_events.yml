@@ -1,0 +1,49 @@
+---
+# Rulebook activation: "NetLab NetBox Changes"
+# The webhook source below is replaced at activation time by the AAP event
+# stream "NetLab NetBox" (source mapping), which NetBox posts to.
+#
+# NetBox webhook body: {event, model, timestamp, username, request_id, data, snapshots}
+# Each rule runs "NetLab - Configure Devices" limited to the affected device.
+
+- name: NetBox intent changes
+  hosts: all
+  sources:
+    - name: netbox_webhook
+      ansible.eda.webhook:
+        host: 0.0.0.0
+        port: 5000
+
+  rules:
+    - name: Device created or updated
+      condition: >-
+        event.payload.model == "device"
+        and event.payload.event in ["created", "updated"]
+      action:
+        run_job_template:
+          name: NetLab - Configure Devices
+          organization: Default
+          job_args:
+            limit: "{{ event.payload.data.name }}"
+
+    - name: Interface changed
+      condition: >-
+        event.payload.model == "interface"
+        and event.payload.event in ["created", "updated"]
+      action:
+        run_job_template:
+          name: NetLab - Configure Devices
+          organization: Default
+          job_args:
+            limit: "{{ event.payload.data.device.name }}"
+
+    - name: Interface IP address changed
+      condition: >-
+        event.payload.model == "ipaddress"
+        and event.payload.data.assigned_object_type == "dcim.interface"
+      action:
+        run_job_template:
+          name: NetLab - Configure Devices
+          organization: Default
+          job_args:
+            limit: "{{ event.payload.data.assigned_object.device.name }}"

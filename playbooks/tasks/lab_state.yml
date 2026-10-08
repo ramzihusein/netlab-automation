@@ -1,0 +1,36 @@
+---
+# Run on the lab host. Reads which images were built (02_configure_lab_host)
+# and sets:
+#   lab_active_nodes  - lab_nodes that have an image, each with its 'kind'
+#   lab_active_links  - lab_links whose both ends are active
+
+- name: Read lab image state
+  ansible.builtin.slurp:
+    src: "{{ lab_state_file }}"
+  register: _lab_state_raw
+
+- name: Parse lab image state
+  ansible.builtin.set_fact:
+    lab_state: "{{ _lab_state_raw.content | b64decode | from_json }}"
+    lab_active_nodes: []
+
+- name: Select nodes whose OS image is available
+  ansible.builtin.set_fact:
+    lab_active_nodes: "{{ lab_active_nodes + [item | combine({'kind': lab_state[item.os ~ '_kind']})] }}"
+  loop: "{{ lab_nodes }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: lab_state[item.os ~ '_kind'] | length > 0
+
+- name: Select links between active nodes
+  ansible.builtin.set_fact:
+    lab_active_links: "{{ lab_links | selectattr('a', 'in', _names) | selectattr('b', 'in', _names) | list }}"
+  vars:
+    _names: "{{ lab_active_nodes | map(attribute='name') | list }}"
+
+- name: Show active lab
+  ansible.builtin.debug:
+    msg:
+      - "Kinds: eos={{ lab_state.eos_kind }} ios={{ lab_state.ios_kind }}"
+      - "Nodes: {{ lab_active_nodes | map(attribute='name') | join(', ') }}"
+      - "Links: {{ lab_active_links | length }}"

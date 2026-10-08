@@ -1,0 +1,6 @@
+---
+# Installed by AAP on project sync. Everything else (amazon.aws, arista.eos,
+# cisco.ios, ansible.netcommon, ansible.posix) ships in the supported EE.
+collections:
+  - name: netbox.netbox
+    version: ">=3.19.0"

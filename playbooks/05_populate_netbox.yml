@@ -1,0 +1,263 @@
+---
+# Job Template: NetLab - Populate NetBox
+# Purpose: Seeds NetBox with the lab (site, roles, platforms, devices,
+#          interfaces, IPs, cables) from vars/netlab.yml for the nodes that are
+#          actually deployed. Devices, interfaces and IPs are create-only, so
+#          rerunning never overwrites changes made in NetBox, which is the
+#          source of truth from here on.
+#          Also proves NetBox -> device reachability.
+#
+# Required AAP Credential: "NetBox API" (netbox_url, netbox_token)
+
+- name: NetLab — read deployed lab
+  hosts: role_labhost
+  gather_facts: false
+
+  vars_files:
+    - ../vars/netlab.yml
+
+  tasks:
+    - name: Load lab image state
+      ansible.builtin.include_tasks: tasks/lab_state.yml
+
+
+- name: NetLab — seed NetBox
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../vars/netlab.yml
+
+  vars:
+    nodes: "{{ hostvars[groups['role_labhost'][0]].lab_active_nodes }}"
+    links: "{{ hostvars[groups['role_labhost'][0]].lab_active_links }}"
+    kind_of: "{{ dict(nodes | map(attribute='name') | zip(nodes | map(attribute='kind'))) }}"
+    site_slug: netlab-aws
+    platform_names: {eos: Arista EOS, ios: Cisco IOS}
+    tag: [{slug: "{{ netlab_tag }}"}]
+
+  module_defaults:
+    ansible.builtin.uri:
+      headers:
+        Authorization: "Token {{ netbox_token }}"
+        Accept: application/json
+      body_format: json
+      validate_certs: false
+      timeout: 60
+
+  tasks:
+
+    # ------------------------------------------------------------ taxonomy
+    - name: Build taxonomy objects
+      ansible.builtin.set_fact:
+        nb_taxonomy:
+          - endpoint: extras/tags
+            lookup: {slug: "{{ netlab_tag }}"}
+            body: {name: "{{ netlab_tag }}", slug: "{{ netlab_tag }}", color: 2196f3, description: Managed by AAP NetLab}
+          - endpoint: dcim/sites
+            lookup: {slug: "{{ site_slug }}"}
+            body: {name: NetLab AWS, slug: "{{ site_slug }}", status: active, description: "containerlab on EC2 ({{ aws_region }})", tags: "{{ tag }}"}
+          - endpoint: dcim/device-roles
+            lookup: {slug: spine}
+            body: {name: Spine, slug: spine, color: 3f51b5}
+          - endpoint: dcim/device-roles
+            lookup: {slug: leaf}
+            body: {name: Leaf, slug: leaf, color: "009688"}
+
+    - name: Add manufacturer, device type and platform per kind
+      ansible.builtin.set_fact:
+        nb_taxonomy: >-
+          {{ nb_taxonomy + [
+               {'endpoint': 'dcim/manufacturers', 'lookup': {'slug': k.manufacturer | lower},
+                'body': {'name': k.manufacturer, 'slug': k.manufacturer | lower}},
+               {'endpoint': 'dcim/device-types', 'lookup': {'slug': k.device_type | lower | regex_replace('[^a-z0-9]+', '-')},
+                'body': {'manufacturer': {'slug': k.manufacturer | lower}, 'model': k.device_type,
+                         'slug': k.device_type | lower | regex_replace('[^a-z0-9]+', '-')}},
+               {'endpoint': 'dcim/platforms', 'lookup': {'slug': k.os},
+                'body': {'name': platform_names[k.os], 'slug': k.os, 'manufacturer': {'slug': k.manufacturer | lower}}}
+             ] }}
+      loop: "{{ nodes | map(attribute='kind') | unique }}"
+      vars:
+        k: "{{ os_kinds[item] }}"
+
+    - name: Ensure taxonomy
+      ansible.builtin.include_tasks: tasks/nb_ensure.yml
+      loop: "{{ nb_taxonomy }}"
+      loop_control:
+        loop_var: nb
+        label: "{{ nb.endpoint }} {{ nb.lookup }}"
+
+    # ------------------------------------------------- devices + interfaces
+    - name: Build device objects
+      ansible.builtin.set_fact:
+        nb_devices: >-
+          {{ nb_devices | default([]) + [{
+               'endpoint': 'dcim/devices', 'lookup': {'name': item.name}, 'update': false,
+               'body': {'name': item.name, 'role': {'slug': item.role}, 'site': {'slug': site_slug},
+                        'device_type': {'slug': os_kinds[item.kind].device_type | lower | regex_replace('[^a-z0-9]+', '-')},
+                        'platform': {'slug': item.os}, 'status': 'active', 'tags': tag,
+                        'comments': 'containerlab kind ' ~ item.kind}}] }}
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Build mgmt and loopback interfaces
+      ansible.builtin.set_fact:
+        nb_interfaces: >-
+          {{ nb_interfaces | default([]) + [
+               {'endpoint': 'dcim/interfaces', 'lookup': {'device': item.name, 'name': os_kinds[item.kind].mgmt_iface}, 'update': false,
+                'body': {'device': {'name': item.name}, 'name': os_kinds[item.kind].mgmt_iface, 'type': '1000base-t',
+                         'mgmt_only': true, 'description': 'containerlab mgmt', 'tags': tag}},
+               {'endpoint': 'dcim/interfaces', 'lookup': {'device': item.name, 'name': 'Loopback0'}, 'update': false,
+                'body': {'device': {'name': item.name}, 'name': 'Loopback0', 'type': 'virtual',
+                         'description': 'router-id', 'tags': tag}}
+             ] }}
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Build point-to-point interfaces
+      ansible.builtin.set_fact:
+        nb_interfaces: >-
+          {{ nb_interfaces + [
+               {'endpoint': 'dcim/interfaces', 'lookup': {'device': item.a, 'name': a_if}, 'update': false,
+                'body': {'device': {'name': item.a}, 'name': a_if, 'type': '1000base-t',
+                         'description': 'to ' ~ item.b ~ ' ' ~ b_if, 'tags': tag}},
+               {'endpoint': 'dcim/interfaces', 'lookup': {'device': item.b, 'name': b_if}, 'update': false,
+                'body': {'device': {'name': item.b}, 'name': b_if, 'type': '1000base-t',
+                         'description': 'to ' ~ item.a ~ ' ' ~ a_if, 'tags': tag}}
+             ] }}
+      loop: "{{ links }}"
+      loop_control:
+        label: "{{ item.a }} <-> {{ item.b }}"
+      vars:
+        a_if: "{{ os_kinds[kind_of[item.a]].iface_prefix ~ (item.a_port + os_kinds[kind_of[item.a]].iface_offset) }}"
+        b_if: "{{ os_kinds[kind_of[item.b]].iface_prefix ~ (item.b_port + os_kinds[kind_of[item.b]].iface_offset) }}"
+
+    - name: Ensure devices and interfaces
+      ansible.builtin.include_tasks: tasks/nb_ensure.yml
+      loop: "{{ nb_devices + nb_interfaces }}"
+      loop_control:
+        loop_var: nb
+        label: "{{ nb.endpoint }} {{ nb.lookup.values() | join(' ') }}"
+
+    - name: Read lab interfaces
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/dcim/interfaces/?site={{ site_slug }}&limit=1000"
+      register: nb_iface_list
+
+    - name: Index interfaces by device|name
+      ansible.builtin.set_fact:
+        nb_iface: "{{ nb_iface | default({}) | combine({item.device.name ~ '|' ~ item.name: item}) }}"
+      loop: "{{ nb_iface_list.json.results }}"
+      loop_control:
+        label: "{{ item.device.name }} {{ item.name }}"
+
+    # ------------------------------------------------------------- addresses
+    - name: Build mgmt and loopback IPs
+      ansible.builtin.set_fact:
+        nb_ips: >-
+          {{ nb_ips | default([]) + [
+               {'endpoint': 'ipam/ip-addresses', 'lookup': {'address': item.mgmt_ip ~ '/' ~ lab_mgmt_prefixlen}, 'update': false,
+                'body': {'address': item.mgmt_ip ~ '/' ~ lab_mgmt_prefixlen, 'status': 'active', 'tags': tag,
+                         'description': item.name ~ ' mgmt', 'assigned_object_type': 'dcim.interface',
+                         'assigned_object_id': nb_iface[item.name ~ '|' ~ os_kinds[item.kind].mgmt_iface].id}},
+               {'endpoint': 'ipam/ip-addresses', 'lookup': {'address': item.loopback}, 'update': false,
+                'body': {'address': item.loopback, 'status': 'active', 'role': 'loopback', 'tags': tag,
+                         'description': item.name ~ ' router-id', 'assigned_object_type': 'dcim.interface',
+                         'assigned_object_id': nb_iface[item.name ~ '|Loopback0'].id}}
+             ] }}
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Build point-to-point IPs
+      ansible.builtin.set_fact:
+        nb_ips: >-
+          {{ nb_ips + [
+               {'endpoint': 'ipam/ip-addresses', 'lookup': {'address': item.a_ip}, 'update': false,
+                'body': {'address': item.a_ip, 'status': 'active', 'tags': tag, 'assigned_object_type': 'dcim.interface',
+                         'assigned_object_id': nb_iface[item.a ~ '|' ~ a_if].id}},
+               {'endpoint': 'ipam/ip-addresses', 'lookup': {'address': item.b_ip}, 'update': false,
+                'body': {'address': item.b_ip, 'status': 'active', 'tags': tag, 'assigned_object_type': 'dcim.interface',
+                         'assigned_object_id': nb_iface[item.b ~ '|' ~ b_if].id}}
+             ] }}
+      loop: "{{ links }}"
+      loop_control:
+        label: "{{ item.a }} <-> {{ item.b }}"
+      vars:
+        a_if: "{{ os_kinds[kind_of[item.a]].iface_prefix ~ (item.a_port + os_kinds[kind_of[item.a]].iface_offset) }}"
+        b_if: "{{ os_kinds[kind_of[item.b]].iface_prefix ~ (item.b_port + os_kinds[kind_of[item.b]].iface_offset) }}"
+
+    - name: Ensure IP addresses
+      ansible.builtin.include_tasks: tasks/nb_ensure.yml
+      loop: "{{ nb_ips }}"
+      loop_control:
+        loop_var: nb
+        label: "{{ nb.lookup.address }}"
+
+    - name: Read lab devices
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/dcim/devices/?site={{ site_slug }}&limit=1000"
+      register: nb_device_list
+
+    - name: Read lab IPs
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/ip-addresses/?tag={{ netlab_tag }}&limit=1000"
+      register: nb_ip_list
+
+    - name: Set mgmt IP as primary IPv4 (only if none set)
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/dcim/devices/{{ item.id }}/"
+        method: PATCH
+        body:
+          primary_ip4: "{{ (nb_ip_list.json.results | selectattr('address', 'equalto', mgmt_cidr) | first).id }}"
+      changed_when: true
+      loop: "{{ nb_device_list.json.results | selectattr('name', 'in', kind_of.keys() | list) | selectattr('primary_ip4', 'none') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      vars:
+        mgmt_cidr: "{{ (nodes | selectattr('name', 'equalto', item.name) | first).mgmt_ip ~ '/' ~ lab_mgmt_prefixlen }}"
+
+    # ---------------------------------------------------------------- cables
+    - name: Cable point-to-point links (skip if already cabled)
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/dcim/cables/"
+        method: POST
+        status_code: 201
+        body:
+          status: connected
+          tags: "{{ tag }}"
+          a_terminations: [{object_type: dcim.interface, object_id: "{{ nb_iface[item.a ~ '|' ~ a_if].id }}"}]
+          b_terminations: [{object_type: dcim.interface, object_id: "{{ nb_iface[item.b ~ '|' ~ b_if].id }}"}]
+      changed_when: true
+      when: nb_iface[item.a ~ '|' ~ a_if].cable is none
+      loop: "{{ links }}"
+      loop_control:
+        label: "{{ item.a }}:{{ a_if }} <-> {{ item.b }}:{{ b_if }}"
+      vars:
+        a_if: "{{ os_kinds[kind_of[item.a]].iface_prefix ~ (item.a_port + os_kinds[kind_of[item.a]].iface_offset) }}"
+        b_if: "{{ os_kinds[kind_of[item.b]].iface_prefix ~ (item.b_port + os_kinds[kind_of[item.b]].iface_offset) }}"
+
+    - name: Print NetBox summary
+      ansible.builtin.debug:
+        msg: "NetBox has {{ nb_device_list.json.count }} lab devices, {{ nb_ip_list.json.count }} IPs ({{ netbox_url }})"
+
+
+- name: NetLab — verify NetBox can reach the devices
+  hosts: role_netbox
+  gather_facts: false
+
+  vars:
+    nodes: "{{ hostvars[groups['role_labhost'][0]].lab_active_nodes }}"
+
+  tasks:
+    - name: Connect to each device mgmt IP from the NetBox host
+      ansible.builtin.wait_for:
+        host: "{{ item.mgmt_ip }}"
+        port: 22
+        timeout: 60
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item.name }} {{ item.mgmt_ip }}"

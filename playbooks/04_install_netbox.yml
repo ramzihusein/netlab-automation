@@ -1,0 +1,131 @@
+---
+# Job Template: NetLab - Install NetBox
+# Purpose: Runs NetBox (netbox-docker) on the NetBox EC2 instance, creates the
+#          admin user and the API token AAP uses, and checks AAP -> NetBox.
+#
+# Required AAP Credential: "NetBox API" type, which injects
+#   netbox_url, netbox_token, netbox_admin_password
+
+- name: NetLab — install NetBox
+  hosts: role_netbox
+  become: true
+
+  vars_files:
+    - ../vars/netlab.yml
+
+  vars:
+    netbox_docker_version: "3.3.0"     # netbox-docker release (ships NetBox 4.3)
+    netbox_docker_dir: /opt/netbox-docker
+    netbox_port: 8000
+
+  tasks:
+
+    - name: Install Docker
+      ansible.builtin.include_tasks: tasks/docker.yml
+
+    - name: Fetch netbox-docker
+      ansible.builtin.git:
+        repo: https://github.com/netbox-community/netbox-docker.git
+        dest: "{{ netbox_docker_dir }}"
+        version: "{{ netbox_docker_version }}"
+        force: false
+
+    - name: Expose NetBox on the host
+      ansible.builtin.copy:
+        dest: "{{ netbox_docker_dir }}/docker-compose.override.yml"
+        mode: "0644"
+        content: |
+          services:
+            netbox:
+              ports:
+                - "{{ netbox_port }}:8080"
+
+    - name: Start NetBox (first start pulls images and runs migrations)
+      ansible.builtin.command: docker compose up -d --wait
+      args:
+        chdir: "{{ netbox_docker_dir }}"
+      register: compose_up
+      changed_when: "'Started' in compose_up.stderr or 'Created' in compose_up.stderr"
+
+    - name: Bring NetBox back after instance stop/start
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/netbox.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=NetBox (netbox-docker)
+          After=docker.service network-online.target
+          Requires=docker.service
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=true
+          WorkingDirectory={{ netbox_docker_dir }}
+          ExecStart=/usr/bin/docker compose up -d
+          ExecStop=/usr/bin/docker compose stop
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Enable NetBox unit
+      ansible.builtin.systemd_service:
+        name: netbox
+        enabled: true
+        daemon_reload: true
+
+    - name: Wait for NetBox API
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ netbox_port }}/api/status/"
+      register: nb_status
+      until: nb_status.status == 200
+      retries: 60
+      delay: 10
+
+    - name: Ensure admin user and AAP API token
+      ansible.builtin.command:
+        cmd: >-
+          docker compose exec -T
+          -e NB_PASSWORD -e NB_TOKEN
+          netbox /opt/netbox/netbox/manage.py shell -c "
+          import os;
+          from django.contrib.auth import get_user_model;
+          from users.models import Token;
+          u, _ = get_user_model().objects.get_or_create(username='admin');
+          u.is_superuser = True; u.is_staff = True; u.is_active = True;
+          u.set_password(os.environ['NB_PASSWORD']); u.save();
+          t, created = Token.objects.get_or_create(user=u, key=os.environ['NB_TOKEN'], defaults={'description': 'AAP'});
+          print('token-created' if created else 'token-exists')"
+        chdir: "{{ netbox_docker_dir }}"
+      environment:
+        NB_PASSWORD: "{{ netbox_admin_password }}"
+        NB_TOKEN: "{{ netbox_token }}"
+      register: nb_admin
+      changed_when: "'token-created' in nb_admin.stdout"
+      no_log: true
+
+    - name: Show NetBox version
+      ansible.builtin.debug:
+        msg: "NetBox {{ nb_status.json['netbox-version'] }} is up"
+
+
+- name: NetLab — verify AAP can reach NetBox
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+
+    - name: Call NetBox API from the AAP execution node with the AAP token
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/users/tokens/"
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+          Accept: application/json
+      register: nb_check
+      until: nb_check.status == 200
+      retries: 12
+      delay: 10
+
+    - name: Print NetBox summary
+      ansible.builtin.debug:
+        msg: "AAP -> {{ netbox_url }} OK (authenticated)"

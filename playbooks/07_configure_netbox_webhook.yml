@@ -1,0 +1,81 @@
+---
+# Job Template: NetLab - Configure NetBox Webhook
+# Purpose: Points NetBox at the AAP EDA event stream: a webhook plus an event
+#          rule for device / interface / IP address changes. Then checks the
+#          NetBox host can reach the AAP gateway that serves the event stream.
+#
+# Required AAP Credentials:
+#   "NetBox API"                (netbox_url, netbox_token)
+#   "EDA Event Stream Target"   (eda_event_stream_url, eda_event_stream_header,
+#                                eda_event_stream_token)
+
+- name: NetLab — NetBox webhook to EDA
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../vars/netlab.yml
+
+  module_defaults:
+    ansible.builtin.uri:
+      headers:
+        Authorization: "Token {{ netbox_token }}"
+        Accept: application/json
+      body_format: json
+      validate_certs: false
+      timeout: 60
+
+  tasks:
+
+    - name: Ensure webhook to the EDA event stream
+      ansible.builtin.include_tasks: tasks/nb_ensure.yml
+      loop:
+        - endpoint: extras/webhooks
+          lookup: {name: AAP EDA - NetLab}
+          secret: true
+          body:
+            name: AAP EDA - NetLab
+            description: NetBox changes -> AAP Event-Driven Ansible event stream
+            payload_url: "{{ eda_event_stream_url }}"
+            http_method: POST
+            http_content_type: application/json
+            additional_headers: "{{ eda_event_stream_header }}: {{ eda_event_stream_token }}"
+            ssl_verification: false     # AAP gateway uses a self-signed certificate
+      loop_control:
+        loop_var: nb
+        label: "{{ nb.endpoint }} {{ nb.lookup.name }}"
+
+    - name: Ensure event rule for lab intent changes
+      ansible.builtin.include_tasks: tasks/nb_ensure.yml
+      loop:
+        - endpoint: extras/event-rules
+          lookup: {name: NetLab intent change}
+          body:
+            name: NetLab intent change
+            description: Device, interface and IP changes trigger AAP to reconfigure the device
+            enabled: true
+            object_types: [dcim.device, dcim.interface, ipam.ipaddress]
+            event_types: [object_created, object_updated, object_deleted]
+            action_type: webhook
+            action_object_type: extras.webhook
+            action_object_id: "{{ nb_obj.id }}"
+      loop_control:
+        loop_var: nb
+        label: "{{ nb.endpoint }} {{ nb.lookup.name }}"
+
+
+- name: NetLab — verify NetBox can reach AAP
+  hosts: role_netbox
+  gather_facts: false
+
+  tasks:
+    - name: Reach the AAP gateway that hosts the event stream, from the NetBox host
+      ansible.builtin.uri:
+        url: "{{ eda_event_stream_url | urlsplit('scheme') }}://{{ eda_event_stream_url | urlsplit('netloc') }}/api/gateway/v1/ping/"
+        validate_certs: false
+      register: gw_ping
+
+    - name: Print reachability summary
+      ansible.builtin.debug:
+        msg: "NetBox host -> {{ eda_event_stream_url | urlsplit('netloc') }} OK (HTTP {{ gw_ping.status }})"

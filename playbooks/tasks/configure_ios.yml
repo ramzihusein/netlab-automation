@@ -1,0 +1,33 @@
+---
+# Cisco IOS / IOS-XE (IOL or c8000v). Inputs: nb_ifaces, nb_l3 from 06_configure_devices.yml
+
+- name: Hostname
+  cisco.ios.ios_config:
+    lines:
+      - "hostname {{ inventory_hostname }}"
+
+- name: Build IOS interface config
+  ansible.builtin.set_fact:
+    ios_ifaces: >-
+      {{ ios_ifaces | default([]) + [
+           {'name': item.name, 'enabled': item.enabled}
+           | combine({'description': item.description} if item.description else {})
+         ] }}
+  loop: "{{ nb_ifaces }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Interface descriptions and state
+  cisco.ios.ios_interfaces:
+    config: "{{ ios_ifaces }}"
+    state: replaced
+
+- name: Interface IPv4 addresses
+  cisco.ios.ios_l3_interfaces:
+    config: "{{ nb_l3 }}"
+    state: replaced
+
+- name: Save configuration
+  cisco.ios.ios_command:
+    commands: write memory
+  changed_when: false

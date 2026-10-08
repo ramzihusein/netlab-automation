@@ -1,0 +1,30 @@
+---
+# Install Docker Engine + compose plugin on Ubuntu (shared by lab host and NetBox).
+
+- name: Wait for cloud-init to finish (it holds the apt lock on first boot)
+  ansible.builtin.command: cloud-init status --wait
+  changed_when: false
+  failed_when: false
+
+- name: Install base packages
+  ansible.builtin.apt:
+    name: [ca-certificates, curl, git, make, jq]
+    update_cache: true
+    lock_timeout: 300
+
+- name: Install Docker Engine
+  ansible.builtin.shell: curl -fsSL https://get.docker.com | sh
+  args:
+    creates: /usr/bin/docker
+
+- name: Start Docker
+  ansible.builtin.systemd_service:
+    name: docker
+    enabled: true
+    state: started
+
+- name: Let the login user run docker
+  ansible.builtin.user:
+    name: "{{ ansible_user }}"
+    groups: docker
+    append: true
