@@ -259,6 +259,7 @@
             remote_src: true
             mode: "0644"
 
+        # Builds vr-c8000v:<ver> (autonomous) and vr-c8000v:controller-<ver> (SD-WAN); we want the first.
         - name: Build vrnetlab c8000v image (boots the VM once; slow)
           ansible.builtin.command: make docker-image
           args:
@@ -275,7 +276,8 @@
           ansible.builtin.command: >-
             docker tag
             {{ (built.stdout_lines | map('from_json')
-                | selectattr('Repository', 'search', 'c8000v') | first).ID }}
+                | selectattr('Repository', 'search', 'c8000v')
+                | rejectattr('Tag', 'search', '^controller') | first).ID }}
             {{ os_kinds.cisco_c8000v.image }}
 
     - name: Check final images
