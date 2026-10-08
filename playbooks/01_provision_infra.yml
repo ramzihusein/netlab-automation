@@ -125,7 +125,7 @@
         {{ ansible_playbook_python }} {{ playbook_dir }}/../scripts/netlab_aws.py nested-template
         --region {{ aws_region }} --name netlab-nested-virt
       register: nested_tpl
-      changed_when: (nested_tpl.stdout | from_json).changed
+      changed_when: nested_tpl.rc == 0 and (nested_tpl.stdout | from_json).changed
       when: lab_nested_virt | bool
 
     - name: Launch containerlab host
@@ -196,7 +196,7 @@
         --cidr {{ lab_mgmt_subnet }}
         --instance-id {{ lab_host.instance_id }}
       register: route_result
-      changed_when: (route_result.stdout | from_json).changed
+      changed_when: route_result.rc == 0 and (route_result.stdout | from_json).changed
 
     - name: Publish DNS records
       amazon.aws.route53:

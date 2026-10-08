@@ -31,7 +31,7 @@
         {{ ansible_playbook_python }} {{ playbook_dir }}/../scripts/netlab_aws.py disable
         --region {{ aws_region }} --route-table-id {{ route_table_id }} --cidr {{ lab_mgmt_subnet }}
       register: route_result
-      changed_when: (route_result.stdout | from_json).changed
+      changed_when: route_result.rc == 0 and (route_result.stdout | from_json).changed
 
     - name: Read DNS records
       amazon.aws.route53:
