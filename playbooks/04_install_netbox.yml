@@ -50,9 +50,11 @@
       register: compose_up
       changed_when: "'Started' in compose_up.stderr or 'Created' in compose_up.stderr"
 
-    - name: Wait for NetBox API (migrations finished)
+    # netbox-docker sets LOGIN_REQUIRED, so /api/status/ is 403 until we have a
+    # token; /login/ answers 200 as soon as the app is serving.
+    - name: Wait for NetBox web app (migrations finished)
       ansible.builtin.uri:
-        url: "http://127.0.0.1:{{ netbox_port }}/api/status/"
+        url: "http://127.0.0.1:{{ netbox_port }}/login/"
       register: nb_first_start
       until: nb_first_start.status == 200
       retries: 120
@@ -91,11 +93,11 @@
         enabled: true
         daemon_reload: true
 
-    - name: Wait for NetBox API
+    - name: Wait for NetBox web app
       ansible.builtin.uri:
-        url: "http://127.0.0.1:{{ netbox_port }}/api/status/"
-      register: nb_status
-      until: nb_status.status == 200
+        url: "http://127.0.0.1:{{ netbox_port }}/login/"
+      register: nb_ready
+      until: nb_ready.status == 200
       retries: 60
       delay: 10
 
@@ -120,6 +122,14 @@
       register: nb_admin
       changed_when: "'token-created' in nb_admin.stdout"
       no_log: true
+
+    - name: Read NetBox status with the AAP token
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ netbox_port }}/api/status/"
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+          Accept: application/json
+      register: nb_status
 
     - name: Show NetBox version
       ansible.builtin.debug:
