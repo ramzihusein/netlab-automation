@@ -48,6 +48,22 @@
 
   tasks:
 
+    # Seeding creates ~40 objects; with the EDA event rule live, each would
+    # queue a Configure Devices job. Pause it here, re-enable at the end. (If
+    # this run fails midway, the next Populate or Configure NetBox Webhook run
+    # turns it back on.)
+    - name: Find the NetBox -> EDA event rule
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/extras/event-rules/?name={{ 'NetLab intent change' | urlencode }}"
+      register: nb_event_rule
+
+    - name: Pause the event rule while seeding
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/extras/event-rules/{{ nb_event_rule.json.results[0].id }}/"
+        method: PATCH
+        body: {enabled: false}
+      when: nb_event_rule.json.count == 1 and nb_event_rule.json.results[0].enabled
+
     # ------------------------------------------------------------ taxonomy
     - name: Build taxonomy objects
       ansible.builtin.set_fact:
@@ -239,6 +255,13 @@
       vars:
         a_if: "{{ os_kinds[kind_of[item.a]].iface_prefix ~ (item.a_port + os_kinds[kind_of[item.a]].iface_offset) }}"
         b_if: "{{ os_kinds[kind_of[item.b]].iface_prefix ~ (item.b_port + os_kinds[kind_of[item.b]].iface_offset) }}"
+
+    - name: Re-enable the event rule
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/extras/event-rules/{{ nb_event_rule.json.results[0].id }}/"
+        method: PATCH
+        body: {enabled: true}
+      when: nb_event_rule.json.count == 1
 
     - name: Print NetBox summary
       ansible.builtin.debug:
