@@ -183,6 +183,7 @@ NetBox webhook (HMAC-signed) ─► API Gateway ─► Lambda (verifies X-Hook-S
 |---|---|
 | AWS resources | `aws/netbox-events.yml` (stack `netlab-netbox-events`) |
 | Rulebook | `rulebooks/netbox_events_sqs.yml` (same rules as the direct one, `event.body` instead of `event.payload`) |
+| Read the events | CloudWatch → Log groups → `/aws/events/netlab-netbox-events` (every event on the bus, 30 days) |
 | Credentials | AAP "NetLab AWS Event Ingest" (URL + HMAC secret), EDA "NetLab SQS Reader" (queue-only access key) |
 
 **Switching paths:** launch **NetLab - Configure NetBox Webhook** and choose

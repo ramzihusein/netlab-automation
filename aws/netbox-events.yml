@@ -138,6 +138,43 @@ Resources:
           RetryPolicy:
             MaximumEventAgeInSeconds: 86400
 
+  # ------------------------------------------------------------ visibility
+  # EventBridge has no event browser; copy every NetBox event into CloudWatch
+  # Logs so people can read them (Logs / Logs Insights).
+  EventLog:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/events/${Name}
+      RetentionInDays: 30
+
+  EventLogPolicy:
+    Type: AWS::Logs::ResourcePolicy
+    Properties:
+      PolicyName: !Sub ${Name}-eventbridge-to-logs
+      PolicyDocument: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"Service": ["events.amazonaws.com", "delivery.logs.amazonaws.com"]},
+            "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+            "Resource": "${EventLog.Arn}"
+          }]
+        }
+
+  LogAllRule:
+    Type: AWS::Events::Rule
+    DependsOn: EventLogPolicy
+    Properties:
+      Name: !Sub ${Name}-log-all
+      Description: Every NetBox event on the bus -> CloudWatch Logs
+      EventBusName: !Ref Bus
+      EventPattern:
+        source: [netbox]
+      Targets:
+        - Id: log-group
+          Arn: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${EventLog}
+
   # ----------------------------------------------------------------- queues
   EdaQueue:
     Type: AWS::SQS::Queue
@@ -212,3 +249,6 @@ Outputs:
     Value: !Ref EdaReaderSecret
   BusName:
     Value: !Ref Bus
+  EventLogGroup:
+    Description: Read every NetBox event here (CloudWatch -> Log groups / Logs Insights)
+    Value: !Ref EventLog
