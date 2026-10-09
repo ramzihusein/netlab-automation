@@ -107,6 +107,19 @@ def wait(path, field, done, failed=(), timeout=600):
     raise ApiError(f"timeout waiting for {path} {field} in {done}")
 
 
+def yaml_list(text):
+    """Parse EDA's source_mappings (a YAML list of flat dicts) without PyYAML."""
+    items = []
+    for line in (text or "").splitlines():
+        if line.startswith("- "):
+            items.append({})
+            line = line[2:]
+        key, _, value = line.strip().partition(":")
+        if items and key:
+            items[-1][key.strip()] = value.strip().strip("'\"")
+    return items
+
+
 def yaml_vars(d):
     # JSON is valid YAML; AAP stores extra_vars/source_vars as text.
     return json.dumps(d, indent=2)
@@ -356,12 +369,23 @@ def activation(org_id, aap_cred, stream):
                f"  rulebook_hash: {src['rulebook_hash']}\n")
 
     act = find(f"{E}/activations/", "NetLab NetBox Changes")
-    if act is not None and act.get("rulebook_id") == rb["id"] and act.get("source_mappings") == mapping:
-        print("  = activation: NetLab NetBox Changes")
-        return act
-    if act is not None:   # activations are immutable; recreate on rulebook change
+    if act is not None:
+        # The list view omits source_mappings; compare against the detail view.
+        act = api("GET", f"{E}/activations/{act['id']}/")
+        same_rulebook = (act.get("rulebook_id") or (act.get("rulebook") or {}).get("id")) == rb["id"]
+        stored = [m.get("rulebook_hash") for m in yaml_list(act.get("source_mappings"))]
+        if same_rulebook and stored == [src["rulebook_hash"]]:
+            print("  = activation: NetLab NetBox Changes")
+            return act
+        # Activations are immutable; recreate when the rulebook changed.
+        # Deletion is asynchronous, so wait for the name to be free.
         api("POST", f"{E}/activations/{act['id']}/disable/")
         api("DELETE", f"{E}/activations/{act['id']}/")
+        end = time.time() + 300
+        while find(f"{E}/activations/", "NetLab NetBox Changes") is not None:
+            if time.time() > end:
+                raise ApiError("old activation still present after 5 minutes")
+            time.sleep(5)
     act = api("POST", f"{E}/activations/", {
         "name": "NetLab NetBox Changes",
         "description": "NetBox device/interface/IP changes -> NetLab - Configure Devices",
