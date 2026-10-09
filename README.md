@@ -131,3 +131,36 @@ that already exist.
   SSL verification off.
 - Device passwords are the containerlab defaults; the mgmt network is only
   reachable from inside the VPC.
+
+## Power schedule (AAP + NetLab)
+
+`aws/aap-power-schedule.yml` (CloudFormation stack `aap-lab-power-schedule`) keeps
+AAP off outside working hours. Instances opt in with the tag `PowerSchedule`:
+`aap` = started and stopped by the schedule, `stop-only` = stopped in the evening
+but started on demand (NetLab).
+
+| | On | Off |
+|---|---|---|
+| AAP | 07:00 ET Mon–Fri, or Step Functions → `aap-lab-start` → Start execution | 19:00 ET Mon–Fri, or `aap-lab-stop` |
+| NetLab | AAP workflow **NetLab - Start (build if needed)** | AAP job **NetLab - Stop**, and every weekday evening with AAP |
+
+`aap-lab-start` starts the RDS database first, then the instances, and only
+succeeds once the gateway, controller (all nodes with fresh heartbeats), EDA and
+hub are healthy; otherwise it fails after ~20 minutes with the failing checks.
+An EventBridge rule re-stops the database if RDS auto-starts it after 7 days.
+
+Measured on 2026-10-09: stop 34 s; cold start 12 min (database ~8 min);
+NetLab cold start 8 min.
+
+```bash
+# start / stop by hand
+aws stepfunctions start-execution --region us-east-2 \
+  --state-machine-arn arn:aws:states:us-east-2:863099780958:stateMachine:aap-lab-start
+aws stepfunctions start-execution --region us-east-2 \
+  --state-machine-arn arn:aws:states:us-east-2:863099780958:stateMachine:aap-lab-stop
+
+# pause or resume the schedule
+aws cloudformation deploy --region us-east-2 --stack-name aap-lab-power-schedule \
+  --template-file aws/aap-power-schedule.yml --capabilities CAPABILITY_IAM \
+  --parameter-overrides ScheduleState=DISABLED   # or ENABLED
+```
