@@ -1,21 +1,49 @@
 ---
 # Job Template: NetLab - Configure NetBox Webhook
-# Purpose: Points NetBox at the AAP EDA event stream: a webhook plus an event
-#          rule for device / interface / IP address changes. Then checks the
-#          NetBox host can reach the AAP gateway that serves the event stream.
+# Purpose: Points NetBox's single "NetLab events" webhook at ONE event path and
+#          ensures the event rule for device / interface / IP address changes.
+#          Then checks the NetBox host can reach the chosen endpoint.
+#
+#   netbox_event_path: direct  NetBox -> AAP EDA event stream "NetLab NetBox"
+#                              (activation "NetLab NetBox Changes")
+#   netbox_event_path: aws     NetBox -> API Gateway (HMAC) -> EventBridge -> SQS
+#                              (activation "NetLab NetBox Changes (AWS SQS)")
+#
+#   netbox_event_path: keep    (default) keep whichever path is active now, so
+#                              the NetLab Start workflow never flips it
+#
+# NetBox has one webhook, so only one activation ever receives events; the
+# other stays idle. Rerunning with the current path reasserts it.
 #
 # Required AAP Credentials:
 #   "NetBox API"                (netbox_url, netbox_token)
-#   "EDA Event Stream Target"   (eda_event_stream_url, eda_event_stream_header,
-#                                eda_event_stream_token)
+#   "EDA Event Stream Target"   (eda_event_stream_url/_header/_token)
+#   "AWS Event Ingest"          (aws_event_ingest_url, aws_event_ingest_secret)
 
-- name: NetLab — NetBox webhook to EDA
+- name: NetLab — point the NetBox webhook at one event path
   hosts: localhost
   connection: local
   gather_facts: false
 
   vars_files:
     - ../vars/netlab.yml
+
+  vars:
+    netbox_event_path: keep
+    webhook_name: NetLab events
+    paths:
+      direct:
+        description: "Active path: direct (AAP EDA event stream NetLab NetBox)"
+        payload_url: "{{ eda_event_stream_url }}"
+        additional_headers: "{{ eda_event_stream_header }}: {{ eda_event_stream_token }}"
+        secret: ""
+        ssl_verification: false        # AAP gateway uses a self-signed certificate
+      aws:
+        description: "Active path: aws (API Gateway -> EventBridge -> SQS -> EDA)"
+        payload_url: "{{ aws_event_ingest_url }}"
+        additional_headers: ""
+        secret: "{{ aws_event_ingest_secret }}"   # NetBox signs bodies (X-Hook-Signature)
+        ssl_verification: true
 
   module_defaults:
     ansible.builtin.uri:
@@ -28,23 +56,47 @@
 
   tasks:
 
-    - name: Ensure webhook to the EDA event stream
+    - name: Validate path choice
+      ansible.builtin.assert:
+        that: netbox_event_path in ['keep'] + (paths.keys() | list)
+        fail_msg: "netbox_event_path must be keep, direct or aws"
+
+    - name: Read the current webhook
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/extras/webhooks/?name={{ webhook_name | urlencode }}"
+      register: current_webhook
+
+    - name: Decide the path
+      ansible.builtin.set_fact:
+        event_path: >-
+          {{ netbox_event_path if netbox_event_path != 'keep'
+             else ('aws' if current_webhook.json.count == 1
+                   and current_webhook.json.results[0].payload_url == aws_event_ingest_url
+                   else 'direct') }}
+
+    - name: Find webhook under its pre-switch name
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/extras/webhooks/?name={{ 'AAP EDA - NetLab' | urlencode }}"
+      register: legacy_webhook
+
+    - name: Rename pre-switch webhook (one-time migration)
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/extras/webhooks/{{ legacy_webhook.json.results[0].id }}/"
+        method: PATCH
+        body: {name: "{{ webhook_name }}"}
+      changed_when: true
+      when: legacy_webhook.json.count == 1
+
+    - name: "Point webhook at the {{ event_path }} path"
       ansible.builtin.include_tasks: tasks/nb_ensure.yml
       loop:
         - endpoint: extras/webhooks
-          lookup: {name: AAP EDA - NetLab}
+          lookup: {name: "{{ webhook_name }}"}
           secret: true
-          body:
-            name: AAP EDA - NetLab
-            description: NetBox changes -> AAP Event-Driven Ansible event stream
-            payload_url: "{{ eda_event_stream_url }}"
-            http_method: POST
-            http_content_type: application/json
-            additional_headers: "{{ eda_event_stream_header }}: {{ eda_event_stream_token }}"
-            ssl_verification: false     # AAP gateway uses a self-signed certificate
+          body: "{{ paths[event_path] | combine({'name': webhook_name, 'http_method': 'POST', 'http_content_type': 'application/json'}) }}"
       loop_control:
         loop_var: nb
-        label: "{{ nb.endpoint }} {{ nb.lookup.name }}"
+        label: "{{ nb.endpoint }} {{ nb.lookup.name }} -> {{ event_path }}"
 
     - name: Ensure event rule for lab intent changes
       ansible.builtin.include_tasks: tasks/nb_ensure.yml
@@ -64,18 +116,37 @@
         loop_var: nb
         label: "{{ nb.endpoint }} {{ nb.lookup.name }}"
 
+    - name: Print active path
+      ansible.builtin.debug:
+        msg: "{{ paths[event_path].description }}"
 
-- name: NetLab — verify NetBox can reach AAP
+
+- name: NetLab — verify NetBox can reach the active endpoint
   hosts: role_netbox
   gather_facts: false
+
+  vars:
+    event_path: "{{ hostvars['localhost'].event_path }}"
 
   tasks:
     - name: Reach the AAP gateway that hosts the event stream, from the NetBox host
       ansible.builtin.uri:
         url: "{{ eda_event_stream_url | urlsplit('scheme') }}://{{ eda_event_stream_url | urlsplit('netloc') }}/api/gateway/v1/ping/"
         validate_certs: false
-      register: gw_ping
+      register: endpoint_check
+      when: event_path == 'direct'
+
+    # An unsigned GET is rejected by the HMAC check, which proves the endpoint
+    # is reachable and verifying signatures.
+    - name: Reach the AWS ingest endpoint, from the NetBox host
+      ansible.builtin.uri:
+        url: "{{ aws_event_ingest_url }}"
+        status_code: 401
+      register: endpoint_check_aws
+      when: event_path == 'aws'
 
     - name: Print reachability summary
       ansible.builtin.debug:
-        msg: "NetBox host -> {{ eda_event_stream_url | urlsplit('netloc') }} OK (HTTP {{ gw_ping.status }})"
+        msg: >-
+          NetBox host -> {{ (eda_event_stream_url if event_path == 'direct' else aws_event_ingest_url) | urlsplit('netloc') }}
+          OK (HTTP {{ (endpoint_check if event_path == 'direct' else endpoint_check_aws).status }})

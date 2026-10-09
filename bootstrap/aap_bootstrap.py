@@ -16,6 +16,7 @@ import json
 import os
 import secrets
 import ssl
+import subprocess
 import sys
 import time
 import urllib.error
@@ -284,7 +285,7 @@ def job_templates(org_id, proj, ee_id, inv, creds):
         ("NetLab - Configure Devices", "playbooks/06_configure_devices.yml", "devices", ["devices"],
          {"ask_limit_on_launch": True, "ask_variables_on_launch": True}),
         ("NetLab - Configure NetBox Webhook", "playbooks/07_configure_netbox_webhook.yml", "infra",
-         ["ssh", "netbox", "stream"], {}),
+         ["ssh", "netbox", "stream", "ingest"], {"survey_enabled": True}),
         ("NetLab - Stop", "playbooks/08_stop_netlab.yml", "local", ["aws"],
          {"ask_variables_on_launch": True}),
         ("NetLab - Teardown", "playbooks/99_teardown.yml", "local", ["aws"],
@@ -299,7 +300,7 @@ def job_templates(org_id, proj, ee_id, inv, creds):
         }, **extra))
         have = {c["id"] for c in api("GET", f"{C}/job_templates/{jt['id']}/credentials/")["results"]}
         for key in cred_keys:
-            if creds[key] not in have:
+            if creds.get(key) and creds[key] not in have:
                 api("POST", f"{C}/job_templates/{jt['id']}/credentials/", {"id": creds[key]})
         jts[name] = jt
 
@@ -311,6 +312,15 @@ def job_templates(org_id, proj, ee_id, inv, creds):
             {"question_name": "Also delete the S3 image bucket?", "variable": "delete_images",
              "type": "multiplechoice", "choices": ["false", "true"], "default": "false", "required": True},
         ],
+    })
+    api("POST", f"{C}/job_templates/{jts['NetLab - Configure NetBox Webhook']['id']}/survey_spec/", {
+        "name": "Event path", "description": "",
+        "spec": [{
+            "question_name": "NetBox event path",
+            "question_description": "keep = leave the active path as is (used by the Start workflow)",
+            "variable": "netbox_event_path", "type": "multiplechoice",
+            "choices": ["keep", "direct", "aws"], "default": "keep", "required": True,
+        }],
     })
     return jts
 
@@ -347,8 +357,7 @@ def workflow(org_id, jts):
     return wf
 
 
-def activation(org_id, aap_cred, stream):
-    print("EDA project + rulebook activation")
+def eda_project(org_id):
     proj, created = ensure(f"{E}/projects/", "NetLab Automation", {
         "organization_id": org_id, "url": REPO_URL, "scm_branch": BRANCH,
         "description": "NetBox -> EDA rulebooks",
@@ -356,52 +365,117 @@ def activation(org_id, aap_cred, stream):
     if not created:
         api("POST", f"{E}/projects/{proj['id']}/sync/")
         time.sleep(3)
-    proj = wait(f"{E}/projects/{proj['id']}/", "import_state", {"completed"}, {"failed"})
+    return wait(f"{E}/projects/{proj['id']}/", "import_state", {"completed"}, {"failed"})
 
-    rb = find(f"{E}/rulebooks/", "netbox_events.yml", project_id=proj["id"])
+
+def ensure_activation(org_id, proj, name, rulebook, eda_creds, description, stream=None):
+    """Create the activation, or recreate it if its rulebook changed.
+
+    With `stream`, the rulebook's first source is mapped to that event stream.
+    """
+    rb = find(f"{E}/rulebooks/", rulebook, project_id=proj["id"])
     if rb is None:
-        raise ApiError("rulebook netbox_events.yml not found in EDA project")
-    src = api("GET", f"{E}/rulebooks/{rb['id']}/sources/")["results"][0]
-    de = find(f"{E}/decision-environments/", DE)
-    mapping = (f"- source_name: {src['name']}\n"
-               f"  event_stream_name: {stream['name']}\n"
-               f"  event_stream_id: {stream['id']}\n"
-               f"  rulebook_hash: {src['rulebook_hash']}\n")
+        raise ApiError(f"rulebook {rulebook} not found in EDA project")
+    rb = api("GET", f"{E}/rulebooks/{rb['id']}/")
+    mapping = None
+    if stream is not None:
+        src = api("GET", f"{E}/rulebooks/{rb['id']}/sources/")["results"][0]
+        mapping = (f"- source_name: {src['name']}\n"
+                   f"  event_stream_name: {stream['name']}\n"
+                   f"  event_stream_id: {stream['id']}\n"
+                   f"  rulebook_hash: {src['rulebook_hash']}\n")
 
-    act = find(f"{E}/activations/", "NetLab NetBox Changes")
+    act = find(f"{E}/activations/", name)
     if act is not None:
-        # The list view omits source_mappings; compare against the detail view.
+        # The list view omits source_mappings and rulesets; use the detail view.
         act = api("GET", f"{E}/activations/{act['id']}/")
         same_rulebook = (act.get("rulebook_id") or (act.get("rulebook") or {}).get("id")) == rb["id"]
-        stored = [m.get("rulebook_hash") for m in yaml_list(act.get("source_mappings"))]
-        if same_rulebook and stored == [src["rulebook_hash"]]:
-            print("  = activation: NetLab NetBox Changes")
+        if mapping is not None:
+            unchanged = ([m.get("rulebook_hash") for m in yaml_list(act.get("source_mappings"))]
+                         == [yaml_list(mapping)[0]["rulebook_hash"]])
+        else:
+            unchanged = act.get("rulebook_rulesets") == rb.get("rulesets")
+        if same_rulebook and unchanged:
+            print(f"  = activation: {name}")
             return act
         # Activations are immutable; recreate when the rulebook changed.
         # Deletion is asynchronous, so wait for the name to be free.
         api("POST", f"{E}/activations/{act['id']}/disable/")
         api("DELETE", f"{E}/activations/{act['id']}/")
         end = time.time() + 300
-        while find(f"{E}/activations/", "NetLab NetBox Changes") is not None:
+        while find(f"{E}/activations/", name) is not None:
             if time.time() > end:
-                raise ApiError("old activation still present after 5 minutes")
+                raise ApiError(f"old activation {name} still present after 5 minutes")
             time.sleep(5)
-    act = api("POST", f"{E}/activations/", {
-        "name": "NetLab NetBox Changes",
-        "description": "NetBox device/interface/IP changes -> NetLab - Configure Devices",
+    body = {
+        "name": name, "description": description,
         "organization_id": org_id, "project_id": proj["id"], "rulebook_id": rb["id"],
-        "decision_environment_id": de["id"], "eda_credentials": [aap_cred["id"]],
+        "decision_environment_id": find(f"{E}/decision-environments/", DE)["id"],
+        "eda_credentials": eda_creds,
         "restart_policy": "on-failure", "log_level": "info", "is_enabled": True,
-        "source_mappings": mapping,
-    })
-    print("  + activation: NetLab NetBox Changes")
+    }
+    if mapping is not None:
+        body["source_mappings"] = mapping
+    act = api("POST", f"{E}/activations/", body)
+    print(f"  + activation: {name}")
     return act
+
+
+def aws_event_path(org_id, eda_org_id, stack):
+    """Credentials for the NetBox -> AWS -> SQS -> EDA path (aws/netbox-events.yml)."""
+    print("AWS event path credentials")
+
+    def aws(*args):
+        out = subprocess.run(["aws", "--region", "us-east-2", "--output", "json", *args],
+                             capture_output=True, text=True, check=True).stdout
+        return json.loads(out)
+
+    outputs = {o["OutputKey"]: o["OutputValue"] for o in
+               aws("cloudformation", "describe-stacks", "--stack-name", stack)["Stacks"][0]["Outputs"]}
+    hmac_secret = aws("secretsmanager", "get-secret-value",
+                      "--secret-id", outputs["WebhookSecretArn"])["SecretString"]
+    reader = json.loads(aws("secretsmanager", "get-secret-value",
+                            "--secret-id", outputs["EdaReaderSecretArn"])["SecretString"])
+
+    ingest_ct, _ = ensure(f"{C}/credential_types/", "AWS Event Ingest", {
+        "kind": "cloud",
+        "description": "HTTPS endpoint + HMAC secret for sending NetBox webhooks into AWS",
+        "inputs": {"fields": [
+            {"id": "url", "label": "Ingest URL", "type": "string"},
+            {"id": "secret", "label": "Webhook HMAC secret", "type": "string", "secret": True},
+        ], "required": ["url", "secret"]},
+        "injectors": {"extra_vars": {"aws_event_ingest_url": "{{ url }}",
+                                     "aws_event_ingest_secret": "{{ secret }}"}},
+    })
+    ingest, _ = ensure(f"{C}/credentials/", "NetLab AWS Event Ingest", {
+        "credential_type": ingest_ct["id"], "organization": org_id,
+        "description": f"API Gateway endpoint of stack {stack}",
+        "inputs": {"url": outputs["WebhookUrl"], "secret": hmac_secret},
+    })
+
+    sqs_ct, _ = ensure(f"{E}/credential-types/", "AWS SQS Reader", {
+        "description": "Access key for the ansible.eda.aws_sqs_queue source",
+        "inputs": {"fields": [
+            {"id": "access_key", "label": "Access key ID", "type": "string"},
+            {"id": "secret_key", "label": "Secret access key", "type": "string", "secret": True},
+        ], "required": ["access_key", "secret_key"]},
+        "injectors": {"extra_vars": {"sqs_access_key": "{{ access_key }}",
+                                     "sqs_secret_key": "{{ secret_key }}"}},
+    })
+    sqs, _ = ensure(f"{E}/eda-credentials/", "NetLab SQS Reader", {
+        "credential_type_id": sqs_ct["id"], "organization_id": eda_org_id,
+        "description": f"Reads queue {outputs['QueueName']}",
+        "inputs": reader,
+    })
+    return ingest, sqs
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--secrets-out", help="write generated NetBox admin credentials here (JSON)")
     p.add_argument("--skip-eda", action="store_true", help="controller objects only")
+    p.add_argument("--netbox-events-stack", default="netlab-netbox-events",
+                   help="CloudFormation stack of the NetBox -> AWS path ('' to skip)")
     a = p.parse_args()
     if not BASE or not TOKEN:
         sys.exit("Set AAP_URL and AAP_TOKEN")
@@ -414,6 +488,9 @@ def main():
     if not a.skip_eda:
         aap_cred, stream = eda_side(eda_org_id, stream_ct)
     stream_target = find(f"{C}/credentials/", "NetLab EDA Event Stream")
+    ingest = sqs_cred = None
+    if a.netbox_events_stack and not a.skip_eda:
+        ingest, sqs_cred = aws_event_path(org_id, eda_org_id, a.netbox_events_stack)
 
     proj = project(org_id)
     infra, devices = inventories(org_id, proj, find(f"{C}/credentials/", AWS_CRED)["id"], nb_cred)
@@ -422,13 +499,22 @@ def main():
     creds = {"aws": find(f"{C}/credentials/", AWS_CRED)["id"],
              "ssh": find(f"{C}/credentials/", SSH_CRED)["id"],
              "netbox": nb_cred["id"], "devices": dev_cred["id"],
-             "stream": stream_target["id"] if stream_target else None}
+             "stream": stream_target["id"] if stream_target else None,
+             "ingest": ingest["id"] if ingest else None}
     if creds["stream"] is None:
         sys.exit("NetLab EDA Event Stream credential missing; run without --skip-eda first")
     jts = job_templates(org_id, proj, find(f"{C}/execution_environments/", EE)["id"], inv, creds)
     wf = workflow(org_id, jts)
     if not a.skip_eda:
-        activation(eda_org_id, aap_cred, stream)
+        print("EDA project + rulebook activations")
+        eproj = eda_project(eda_org_id)
+        ensure_activation(eda_org_id, eproj, "NetLab NetBox Changes", "netbox_events.yml",
+                          [aap_cred["id"]], "NetBox changes via event stream -> NetLab - Configure Devices",
+                          stream=stream)
+        if sqs_cred:
+            ensure_activation(eda_org_id, eproj, "NetLab NetBox Changes (AWS SQS)", "netbox_events_sqs.yml",
+                              [aap_cred["id"], sqs_cred["id"]],
+                              "NetBox changes via AWS EventBridge/SQS -> NetLab - Configure Devices")
 
     print("\nDone.")
     print(f"  Workflow: {BASE}/execution/templates/workflow-job-template/{wf['id']}/details")

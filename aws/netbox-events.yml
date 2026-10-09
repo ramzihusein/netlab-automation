@@ -1,0 +1,214 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  NetBox -> AWS -> EDA reference path. NetBox posts signed webhooks to an HTTPS
+  endpoint (API Gateway + Lambda verifies the HMAC signature), which puts them on
+  an EventBridge bus (archived for replay). A rule forwards device / interface /
+  IP events, unwrapped to the original NetBox body, to an SQS FIFO queue that the
+  EDA activation "NetLab NetBox Changes (AWS SQS)" pulls from.
+
+Parameters:
+  Name:
+    Type: String
+    Default: netlab-netbox-events
+
+Resources:
+
+  # -------------------------------------------------------------- ingress
+  WebhookSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${Name}/webhook-secret
+      Description: Shared HMAC secret NetBox signs webhooks with (X-Hook-Signature)
+      GenerateSecretString:
+        PasswordLength: 48
+        ExcludePunctuation: true
+
+  IngestRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ingest
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref WebhookSecret
+              - Effect: Allow
+                Action: events:PutEvents
+                Resource: !GetAtt Bus.Arn
+
+  IngestFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${Name}-ingest
+      Description: Verify NetBox webhook HMAC and put the event on EventBridge
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 10
+      Role: !GetAtt IngestRole.Arn
+      Environment:
+        Variables:
+          SECRET_ARN: !Ref WebhookSecret
+          BUS: !Ref Bus
+      Code:
+        ZipFile: |
+          import base64, hashlib, hmac, json, os
+          import boto3
+
+          SECRET = boto3.client("secretsmanager").get_secret_value(
+              SecretId=os.environ["SECRET_ARN"])["SecretString"].encode()
+          EVENTS = boto3.client("events")
+
+          def handler(event, context):
+              body = event.get("body") or ""
+              raw = base64.b64decode(body) if event.get("isBase64Encoded") else body.encode()
+              headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
+              # NetBox: X-Hook-Signature = hex HMAC-SHA512 of the raw body
+              want = hmac.new(SECRET, raw, hashlib.sha512).hexdigest()
+              if not hmac.compare_digest(headers.get("x-hook-signature", ""), want):
+                  return {"statusCode": 401, "body": "invalid signature"}
+              data = json.loads(raw)
+              resp = EVENTS.put_events(Entries=[{
+                  "EventBusName": os.environ["BUS"],
+                  "Source": "netbox",
+                  "DetailType": "%s.%s" % (data.get("model"), data.get("event")),
+                  "Detail": raw.decode(),
+              }])
+              if resp["FailedEntryCount"]:
+                  return {"statusCode": 502, "body": json.dumps(resp["Entries"])}
+              return {"statusCode": 202, "body": json.dumps({"eventId": resp["Entries"][0]["EventId"]})}
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub ${Name}-api
+      Description: NetBox webhook endpoint
+      ProtocolType: HTTP
+      Target: !GetAtt IngestFunction.Arn    # quick create: $default route + stage
+
+  ApiInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref IngestFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*
+
+  # ---------------------------------------------------------------- routing
+  Bus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: !Ref Name
+
+  BusArchive:
+    Type: AWS::Events::Archive
+    Properties:
+      ArchiveName: !Sub ${Name}-archive
+      Description: Every NetBox event, replayable for 30 days
+      SourceArn: !GetAtt Bus.Arn
+      RetentionDays: 30
+
+  IntentRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${Name}-intent-to-eda
+      Description: Device, interface and IP changes -> EDA queue (NetBox body only)
+      EventBusName: !Ref Bus
+      EventPattern:
+        source: [netbox]
+        detail:
+          model: [device, interface, ipaddress]
+      Targets:
+        - Id: eda-queue
+          Arn: !GetAtt EdaQueue.Arn
+          InputPath: $.detail           # deliver NetBox's own body, not the AWS envelope
+          SqsParameters:
+            MessageGroupId: netbox      # one ordered stream; volume is tiny
+          DeadLetterConfig:
+            Arn: !GetAtt DeadLetterQueue.Arn
+          RetryPolicy:
+            MaximumEventAgeInSeconds: 86400
+
+  # ----------------------------------------------------------------- queues
+  EdaQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${Name}-eda.fifo
+      FifoQueue: true
+      # NetBox's body carries a unique request_id + timestamp, so identical
+      # bodies within 5 minutes are true duplicates (e.g. a webhook retry).
+      ContentBasedDeduplication: true
+      MessageRetentionPeriod: 345600    # 4 days: covers a weekend with AAP off
+      VisibilityTimeout: 60
+
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${Name}-dlq
+      MessageRetentionPeriod: 1209600
+
+  QueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref EdaQueue, !Ref DeadLetterQueue]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: events.amazonaws.com}
+            Action: sqs:SendMessage
+            Resource: [!GetAtt EdaQueue.Arn, !GetAtt DeadLetterQueue.Arn]
+            Condition:
+              ArnEquals: {aws:SourceArn: !GetAtt IntentRule.Arn}
+
+  # ------------------------------------------------------ EDA read access
+  # EDA activations run in containers on the EDA nodes and can't use an
+  # instance role, so they get a narrowly scoped access key.
+  EdaReader:
+    Type: AWS::IAM::User
+    Properties:
+      Policies:
+        - PolicyName: read-netbox-queue
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueUrl, sqs:GetQueueAttributes]
+                Resource: !GetAtt EdaQueue.Arn
+
+  EdaReaderKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref EdaReader
+
+  EdaReaderSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${Name}/eda-reader
+      Description: Access key the EDA activation uses to read the queue
+      SecretString: !Sub '{"access_key":"${EdaReaderKey}","secret_key":"${EdaReaderKey.SecretAccessKey}"}'
+
+Outputs:
+  WebhookUrl:
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/
+  WebhookSecretArn:
+    Value: !Ref WebhookSecret
+  QueueName:
+    Value: !GetAtt EdaQueue.QueueName
+  QueueUrl:
+    Value: !Ref EdaQueue
+  DeadLetterQueueUrl:
+    Value: !Ref DeadLetterQueue
+  EdaReaderSecretArn:
+    Value: !Ref EdaReaderSecret
+  BusName:
+    Value: !Ref Bus
