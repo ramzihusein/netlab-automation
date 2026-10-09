@@ -164,3 +164,38 @@ aws cloudformation deploy --region us-east-2 --stack-name aap-lab-power-schedule
   --template-file aws/aap-power-schedule.yml --capabilities CAPABILITY_IAM \
   --parameter-overrides ScheduleState=DISABLED   # or ENABLED
 ```
+
+## NetBox events through AWS (EventBridge + SQS)
+
+A second, switchable event path for customers who want NetBox events on their
+AWS event backbone before they reach EDA:
+
+```
+NetBox webhook (HMAC-signed) ─► API Gateway ─► Lambda (verifies X-Hook-Signature)
+   ─► EventBridge bus netlab-netbox-events (30-day archive, replayable)
+   ─► rule: source=netbox, model in [device, interface, ipaddress], InputPath $.detail
+   ─► SQS FIFO netlab-netbox-events-eda.fifo (content-based dedup, 4-day retention, DLQ)
+   ─► EDA activation "NetLab NetBox Changes (AWS SQS)" (ansible.eda.aws_sqs_queue)
+   ─► "NetLab - Configure Devices" limit=<device>
+```
+
+| Piece | Where |
+|---|---|
+| AWS resources | `aws/netbox-events.yml` (stack `netlab-netbox-events`) |
+| Rulebook | `rulebooks/netbox_events_sqs.yml` (same rules as the direct one, `event.body` instead of `event.payload`) |
+| Credentials | AAP "NetLab AWS Event Ingest" (URL + HMAC secret), EDA "NetLab SQS Reader" (queue-only access key) |
+
+**Switching paths:** launch **NetLab - Configure NetBox Webhook** and choose
+`direct` or `aws` (`keep`, the default, leaves it as is; the Start workflow uses
+that). NetBox has a single webhook, so exactly one activation receives events;
+the other idles. Verified: one NetBox edit → one job, on either path.
+
+Notes for customer conversations:
+- The AWS path keeps events while AAP is down (SQS holds them 4 days) and lets
+  other consumers subscribe on the bus; the direct path is simpler.
+- The default AAP 2.6 decision environment already includes the SQS source.
+- EventBridge API destinations (push straight to an EDA event stream) need a
+  publicly trusted certificate on the AAP gateway; this lab's is self-signed,
+  hence the pull-from-SQS design.
+- `bootstrap/aap_bootstrap.py` never replaces a running activation unless run
+  with `--recreate-activations` (needed after editing a rulebook).
