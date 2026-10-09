@@ -46,10 +46,11 @@
           {{ j[lab_name] | default(j.containers | default([])) | selectattr('state', 'equalto', 'running') | list | length }}
           {% else %}0{% endif %}
 
+    # Always --reconfigure: after the host was stopped the old (exited) node
+    # containers still exist and a plain deploy refuses to run. Device config
+    # is restored from NetBox by "Configure Devices" afterwards.
     - name: Deploy lab
-      ansible.builtin.command: >-
-        containerlab deploy -t {{ lab_topology_file }}
-        {{ '--reconfigure' if (lab_reconfigure | bool or topology.changed) else '' }}
+      ansible.builtin.command: containerlab deploy -t {{ lab_topology_file }} --reconfigure
       args:
         chdir: "{{ lab_dir }}"
       when: >-

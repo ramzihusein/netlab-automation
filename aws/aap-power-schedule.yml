@@ -1,0 +1,372 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Power schedule for the AAP 2.6 demo (and NetLab). Ordered start with health
+  check, ordered stop, weekday schedule, and a guard against RDS auto-starting
+  after 7 days stopped. Instances opt in with tag PowerSchedule:
+    aap        started and stopped by the schedule
+    stop-only  stopped with AAP in the evening, started on demand (NetLab)
+
+Parameters:
+  ScheduleState:
+    Type: String
+    AllowedValues: [ENABLED, DISABLED]
+    Default: DISABLED
+    Description: Keep DISABLED until a supervised stop/start cycle has passed.
+  DBInstanceId:
+    Type: String
+    Default: aap-demo-db
+  GatewayUrl:
+    Type: String
+    Default: https://gateway.aap.ramzidev.com
+  ExpectedControllerNodes:
+    Type: Number
+    Default: 4
+    Description: control/hybrid/execution nodes that must report capacity and a fresh heartbeat
+  TimeZone:
+    Type: String
+    Default: America/New_York
+  StartCron:
+    Type: String
+    Default: cron(0 7 ? * MON-FRI *)
+  StopCron:
+    Type: String
+    Default: cron(0 19 ? * MON-FRI *)
+
+Resources:
+
+  # ------------------------------------------------------------------ health
+  HealthCheckRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  HealthCheckFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: aap-lab-health-check
+      Description: AAP gateway/controller/EDA/hub health via unauthenticated status endpoints
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 90
+      Role: !GetAtt HealthCheckRole.Arn
+      Environment:
+        Variables:
+          GATEWAY_URL: !Ref GatewayUrl
+          EXPECTED_NODES: !Ref ExpectedControllerNodes
+      Code:
+        ZipFile: |
+          import datetime, json, os, ssl, urllib.request
+
+          BASE = os.environ["GATEWAY_URL"].rstrip("/")
+          EXPECTED = int(os.environ["EXPECTED_NODES"])
+          CTX = ssl.create_default_context()
+          CTX.check_hostname = False
+          CTX.verify_mode = ssl.CERT_NONE   # AAP gateway uses a self-signed certificate
+
+          def get(path):
+              with urllib.request.urlopen(BASE + path, context=CTX, timeout=10) as r:
+                  return json.loads(r.read())
+
+          def controller_ok(d):
+              # Capacity survives a restart until AAP marks a node lost, so also
+              # require a heartbeat from the last 5 minutes.
+              now = datetime.datetime.now(datetime.timezone.utc)
+              nodes = [i for i in d.get("instances", [])
+                       if i.get("node_type") in ("control", "hybrid", "execution")]
+              fresh = [i for i in nodes if i.get("capacity", 0) > 0 and i.get("heartbeat") and
+                       (now - datetime.datetime.fromisoformat(i["heartbeat"].replace("Z", "+00:00"))).total_seconds() < 300]
+              return len(fresh) >= EXPECTED
+
+          def handler(event, context):
+              checks = {}
+              for name, path, ok in [
+                  ("gateway", "/api/gateway/v1/ping/", lambda d: d.get("status") == "good" and d.get("db_connected")),
+                  ("controller", "/api/controller/v2/ping/", controller_ok),
+                  ("eda", "/api/eda/v1/status/", lambda d: d.get("status") == "good"),
+                  ("hub", "/api/galaxy/pulp/api/v3/status/", lambda d: bool(d.get("versions"))),
+              ]:
+                  try:
+                      d = get(path)
+                      checks[name] = "ok" if ok(d) else "unhealthy: " + json.dumps(d)[:400]
+                  except Exception as e:  # not up yet, refused, timeout, bad JSON
+                      checks[name] = ("error: %s" % e)[:400]
+              return {"healthy": all(v == "ok" for v in checks.values()), "checks": checks}
+
+  # ----------------------------------------------------------- state machines
+  PowerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: states.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: aap-lab-power
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ec2:DescribeInstances
+                Resource: "*"
+              - Effect: Allow
+                Action: [ec2:StartInstances, ec2:StopInstances]
+                Resource: !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*
+                Condition:
+                  StringLike: {aws:ResourceTag/PowerSchedule: "*"}
+              - Effect: Allow
+                Action: [rds:DescribeDBInstances, rds:StartDBInstance, rds:StopDBInstance]
+                Resource: !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:${DBInstanceId}
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt HealthCheckFunction.Arn
+
+  StartMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: aap-lab-start
+      RoleArn: !GetAtt PowerRole.Arn
+      Definition:
+        Comment: Start AAP in order (database, then instances) and wait until every service is healthy
+        QueryLanguage: JSONata
+        TimeoutSeconds: 3600
+        StartAt: DescribeDB
+        States:
+          DescribeDB:
+            Type: Task
+            Resource: arn:aws:states:::aws-sdk:rds:describeDBInstances
+            Arguments: {DbInstanceIdentifier: !Ref DBInstanceId}
+            Output: "{% $states.result.DbInstances[0].DbInstanceStatus %}"
+            Next: DBState
+          DBState:
+            Type: Choice
+            Choices:
+              - Condition: "{% $states.input = 'available' %}"
+                Next: FindInstances
+              - Condition: "{% $states.input = 'stopped' %}"
+                Next: StartDB
+            Default: WaitDB
+          StartDB:
+            Type: Task
+            Resource: arn:aws:states:::aws-sdk:rds:startDBInstance
+            Arguments: {DbInstanceIdentifier: !Ref DBInstanceId}
+            Next: WaitDB
+          WaitDB:
+            Type: Wait
+            Seconds: 30
+            Next: DescribeDB
+          FindInstances:
+            Type: Task
+            Resource: arn:aws:states:::aws-sdk:ec2:describeInstances
+            Arguments:
+              Filters:
+                - {Name: "tag:PowerSchedule", Values: [aap]}
+                - {Name: instance-state-name, Values: [stopped]}
+            Output: "{% [$states.result.Reservations.Instances.InstanceId] %}"
+            Assign: {attempts: 0}
+            Next: AnyStopped
+          AnyStopped:
+            Type: Choice
+            Choices:
+              - Condition: "{% $count($states.input) > 0 %}"
+                Next: StartInstances
+            Default: HealthCheck
+          StartInstances:
+            Type: Task
+            Resource: arn:aws:states:::aws-sdk:ec2:startInstances
+            Arguments: {InstanceIds: "{% $states.input %}"}
+            Next: WaitBoot
+          WaitBoot:
+            Type: Wait
+            Seconds: 90
+            Next: HealthCheck
+          HealthCheck:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Arguments:
+              FunctionName: !GetAtt HealthCheckFunction.Arn
+            Assign:
+              attempts: "{% $attempts + 1 %}"
+              checks: "{% $states.result.Payload.checks %}"
+            Output: "{% $states.result.Payload %}"
+            Next: Healthy
+          Healthy:
+            Type: Choice
+            Choices:
+              - Condition: "{% $states.input.healthy %}"
+                Next: Up
+              - Condition: "{% $attempts < 40 %}"
+                Next: WaitHealth
+            Default: NotHealthy
+          WaitHealth:
+            Type: Wait
+            Seconds: 30
+            Next: HealthCheck
+          Up:
+            Type: Succeed
+          NotHealthy:
+            Type: Fail
+            Error: AAPNotHealthy
+            Cause: "{% 'Not healthy after ' & $string($attempts) & ' checks (~20 min): ' & $string($checks) %}"
+
+  StopMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: aap-lab-stop
+      RoleArn: !GetAtt PowerRole.Arn
+      Definition:
+        Comment: Stop AAP and NetLab instances, then the database
+        QueryLanguage: JSONata
+        TimeoutSeconds: 3600
+        StartAt: FindInstances
+        States:
+          FindInstances:
+            Type: Task
+            Resource: arn:aws:states:::aws-sdk:ec2:describeInstances
+            Arguments:
+              Filters:
+                - {Name: "tag:PowerSchedule", Values: [aap, stop-only]}
+                - {Name: instance-state-name, Values: [pending, running]}
+            Output: "{% [$states.result.Reservations.Instances.InstanceId] %}"
+            Next: AnyRunning
+          AnyRunning:
+            Type: Choice
+            Choices:
+              - Condition: "{% $count($states.input) > 0 %}"
+                Next: StopInstances
+            Default: DescribeDB
+          StopInstances:
+            Type: Task
+            Resource: arn:aws:states:::aws-sdk:ec2:stopInstances
+            Arguments: {InstanceIds: "{% $states.input %}"}
+            Next: WaitStopped
+          WaitStopped:
+            Type: Wait
+            Seconds: 30
+            Next: StillStopping
+          StillStopping:
+            Type: Task
+            Resource: arn:aws:states:::aws-sdk:ec2:describeInstances
+            Arguments:
+              Filters:
+                - {Name: "tag:PowerSchedule", Values: [aap, stop-only]}
+                - {Name: instance-state-name, Values: [pending, running, stopping]}
+            Output: "{% $count([$states.result.Reservations.Instances.InstanceId]) %}"
+            Next: AllStopped
+          AllStopped:
+            Type: Choice
+            Choices:
+              - Condition: "{% $states.input = 0 %}"
+                Next: DescribeDB
+            Default: WaitStopped
+          DescribeDB:
+            Type: Task
+            Resource: arn:aws:states:::aws-sdk:rds:describeDBInstances
+            Arguments: {DbInstanceIdentifier: !Ref DBInstanceId}
+            Output: "{% $states.result.DbInstances[0].DbInstanceStatus %}"
+            Next: DBState
+          DBState:
+            Type: Choice
+            Choices:
+              - Condition: "{% $states.input = 'available' %}"
+                Next: StopDB
+              - Condition: "{% $states.input in ['stopped', 'stopping'] %}"
+                Next: Down
+            Default: WaitDB      # starting, backing-up, modifying ...
+          WaitDB:
+            Type: Wait
+            Seconds: 60
+            Next: DescribeDB
+          StopDB:
+            Type: Task
+            Resource: arn:aws:states:::aws-sdk:rds:stopDBInstance
+            Arguments: {DbInstanceIdentifier: !Ref DBInstanceId}
+            Next: Down
+          Down:
+            Type: Succeed
+
+  # ------------------------------------------------------------- schedules
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: [scheduler.amazonaws.com, events.amazonaws.com]}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: start-power-machines
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: states:StartExecution
+                Resource: [!Ref StartMachine, !Ref StopMachine]
+
+  StartSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: aap-lab-weekday-start
+      Description: Start AAP on weekday mornings
+      State: !Ref ScheduleState
+      ScheduleExpression: !Ref StartCron
+      ScheduleExpressionTimezone: !Ref TimeZone
+      FlexibleTimeWindow: {Mode: "OFF"}
+      Target:
+        Arn: !Ref StartMachine
+        RoleArn: !GetAtt SchedulerRole.Arn
+
+  StopSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: aap-lab-weekday-stop
+      Description: Stop AAP and NetLab on weekday evenings
+      State: !Ref ScheduleState
+      ScheduleExpression: !Ref StopCron
+      ScheduleExpressionTimezone: !Ref TimeZone
+      FlexibleTimeWindow: {Mode: "OFF"}
+      Target:
+        Arn: !Ref StopMachine
+        RoleArn: !GetAtt SchedulerRole.Arn
+
+  # RDS starts a stopped instance by itself after 7 days (RDS-EVENT-0154).
+  # Re-run the stop machine so a long break doesn't leave the DB billing.
+  RdsAutoStartGuard:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: aap-lab-rds-autostart-guard
+      Description: Re-stop the AAP database when RDS auto-starts it after 7 days
+      State: !If [ScheduleOn, ENABLED, DISABLED]
+      EventPattern:
+        source: [aws.rds]
+        detail-type: [RDS DB Instance Event]
+        resources: [!Sub "arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:${DBInstanceId}"]
+        detail:
+          EventID: [RDS-EVENT-0154]
+      Targets:
+        - Id: stop-machine
+          Arn: !Ref StopMachine
+          RoleArn: !GetAtt SchedulerRole.Arn
+
+Conditions:
+  ScheduleOn: !Equals [!Ref ScheduleState, ENABLED]
+
+Outputs:
+  StartMachineArn:
+    Value: !Ref StartMachine
+  StopMachineArn:
+    Value: !Ref StopMachine
+  ConsoleStart:
+    Description: Open, then "Start execution" to turn AAP on
+    Value: !Sub https://${AWS::Region}.console.aws.amazon.com/states/home?region=${AWS::Region}#/statemachines/view/${StartMachine}
+  ConsoleStop:
+    Value: !Sub https://${AWS::Region}.console.aws.amazon.com/states/home?region=${AWS::Region}#/statemachines/view/${StopMachine}

@@ -68,7 +68,7 @@ aws s3 cp cEOS64-lab-4.xx.tar.xz            s3://aap-netlab-images-<account>/ima
 aws s3 cp x86_64_crb_linux-adventerprisek9-ms.iol s3://aap-netlab-images-<account>/images/
 ```
 
-Then rerun **NetLab - Build Environment**. Nodes whose OS has no image are
+Then rerun **NetLab - Start (build if needed)**. Nodes whose OS has no image are
 skipped, so the lab works with only cEOS, only IOS, or both. If both IOL and
 c8000v are present, IOL is used (`ios_kind_preference`).
 
@@ -86,7 +86,7 @@ Created by `bootstrap/aap_bootstrap.py` (idempotent):
 | Credential | NetLab EDA Event Stream | event stream URL + token for the NetBox webhook |
 | Inventory | NetLab Infra | `aws_ec2`, tag `Project=netlab`, groups `role_labhost`, `role_netbox` |
 | Inventory | NetLab Devices | NetBox (`inventories/netbox.yml`), update on launch |
-| Workflow | NetLab - Build Environment | 01 → (02 → 03, 04) → 05 → 06 → 07 |
+| Workflow | NetLab - Start (build if needed) | 01 → (02 → 03, 04) → 05 → 06 → 07 |
 | Job template | NetLab - Teardown | survey: type `netlab` to confirm |
 | EDA | NetLab AAP, NetLab NetBox Webhook, event stream NetLab NetBox, activation NetLab NetBox Changes | |
 

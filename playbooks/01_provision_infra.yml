@@ -34,6 +34,9 @@
     common_tags:
       Project: "{{ netlab_tag }}"
       ManagedBy: ansible
+      # The AWS power schedule (aws/aap-power-schedule.yml) stops these with
+      # AAP every evening but never starts them; NetLab starts on demand.
+      PowerSchedule: stop-only
 
   tasks:
 

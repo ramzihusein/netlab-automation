@@ -272,6 +272,8 @@ def job_templates(org_id, proj, ee_id, inv, creds):
          {"ask_limit_on_launch": True, "ask_variables_on_launch": True}),
         ("NetLab - Configure NetBox Webhook", "playbooks/07_configure_netbox_webhook.yml", "infra",
          ["ssh", "netbox", "stream"], {}),
+        ("NetLab - Stop", "playbooks/08_stop_netlab.yml", "local", ["aws"],
+         {"ask_variables_on_launch": True}),
         ("NetLab - Teardown", "playbooks/99_teardown.yml", "local", ["aws"],
          {"extra_vars": yaml_vars(pv), "survey_enabled": True}),
     ]
@@ -302,9 +304,9 @@ def job_templates(org_id, proj, ee_id, inv, creds):
 
 def workflow(org_id, jts):
     print("Workflow")
-    wf, _ = ensure(f"{C}/workflow_job_templates/", "NetLab - Build Environment", {
+    wf, _ = ensure(f"{C}/workflow_job_templates/", "NetLab - Start (build if needed)", {
         "organization": org_id,
-        "description": "Provision lab host + NetBox, build containerlab, seed NetBox, push config, wire EDA",
+        "description": "Builds NetLab, or starts a stopped one: instances, DNS, lab, NetBox, config, EDA, health checks",
     })
     nodes_path = f"{C}/workflow_job_templates/{wf['id']}/workflow_nodes/"
     if api("GET", nodes_path)["count"]:

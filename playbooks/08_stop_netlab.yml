@@ -1,0 +1,41 @@
+---
+# Job Template: NetLab - Stop
+# Purpose: Stops the NetLab EC2 instances to save money. Nothing is lost:
+#          NetBox keeps its data on disk, and device config comes back from
+#          NetBox. Start again with the "NetLab - Start (build if needed)"
+#          workflow, which starts the instances, refreshes DNS, redeploys the
+#          lab, pushes config and re-checks reachability.
+#
+# Optional:
+#   stop_netbox: false   stop only the containerlab host (~85% of the cost)
+
+- name: NetLab — stop instances
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../vars/netlab.yml
+
+  vars:
+    stop_netbox: true
+
+  tasks:
+
+    - name: Stop NetLab instances
+      amazon.aws.ec2_instance:
+        region: "{{ aws_region }}"
+        filters:
+          "tag:Project": "{{ netlab_tag }}"
+          "tag:Role": "{{ ['labhost', 'netbox'] if stop_netbox | bool else ['labhost'] }}"
+          instance-state-name: [pending, running]
+        state: stopped
+        wait: true
+      register: stopped
+
+    - name: Print stop summary
+      ansible.builtin.debug:
+        msg: >-
+          Stopped {{ stopped.instance_ids | default([]) | length }} instance(s){{
+          '' if stop_netbox | bool else ' (NetBox left running)' }}.
+          Start again with "NetLab - Start (build if needed)".
