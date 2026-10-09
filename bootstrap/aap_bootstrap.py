@@ -87,8 +87,10 @@ def api(method, path, body=None, ok=(200, 201, 202, 204)):
 
 
 def find(path, name, **filters):
-    q = urllib.parse.urlencode(dict(name=name, **filters))
-    res = api("GET", f"{path}?{q}").get("results", [])
+    # EDA's ?name= filter matches substrings ("NetLab NetBox Changes" also
+    # matches "... (AWS SQS)"), so insist on an exact match.
+    q = urllib.parse.urlencode(dict(name=name, page_size=200, **filters))
+    res = [r for r in api("GET", f"{path}?{q}").get("results", []) if r.get("name") == name]
     return res[0] if res else None
 
 
@@ -380,7 +382,7 @@ def eda_project(org_id):
     return wait(f"{E}/projects/{proj['id']}/", "import_state", {"completed"}, {"failed"})
 
 
-def ensure_activation(org_id, proj, name, rulebook, eda_creds, description, stream=None):
+def ensure_activation(org_id, proj, name, rulebook, eda_creds, description, stream=None, recreate=False):
     """Create the activation, or recreate it if its rulebook changed.
 
     With `stream`, the rulebook's first source is mapped to that event stream.
@@ -402,13 +404,20 @@ def ensure_activation(org_id, proj, name, rulebook, eda_creds, description, stre
         # The list view omits source_mappings and rulesets; use the detail view.
         act = api("GET", f"{E}/activations/{act['id']}/")
         same_rulebook = (act.get("rulebook_id") or (act.get("rulebook") or {}).get("id")) == rb["id"]
-        if mapping is not None:
-            unchanged = ([m.get("rulebook_hash") for m in yaml_list(act.get("source_mappings"))]
-                         == [yaml_list(mapping)[0]["rulebook_hash"]])
-        else:
-            unchanged = act.get("rulebook_rulesets") == rb.get("rulesets")
-        if same_rulebook and unchanged:
-            print(f"  = activation: {name}")
+        # Event-stream activations carry the rulebook hash in their source
+        # mapping; others don't expose their rulebook content, so for those
+        # only the rulebook itself is compared (use --recreate-activations to
+        # pick up edited rulebook content).
+        unchanged = mapping is None or (
+            [m.get("rulebook_hash") for m in yaml_list(act.get("source_mappings"))]
+            == [yaml_list(mapping)[0]["rulebook_hash"]])
+        if not recreate:
+            if same_rulebook and unchanged:
+                print(f"  = activation: {name}")
+            else:
+                # Never take a live activation down implicitly.
+                print(f"  ! activation: {name} differs from {rulebook}; left running. "
+                      f"Rerun with --recreate-activations to replace it.")
             return act
         # Activations are immutable; recreate when the rulebook changed.
         # Deletion is asynchronous, so wait for the name to be free.
@@ -488,6 +497,8 @@ def main():
     p.add_argument("--skip-eda", action="store_true", help="controller objects only")
     p.add_argument("--netbox-events-stack", default="netlab-netbox-events",
                    help="CloudFormation stack of the NetBox -> AWS path ('' to skip)")
+    p.add_argument("--recreate-activations", action="store_true",
+                   help="replace the activations now, e.g. after editing a rulebook (brief EDA outage)")
     a = p.parse_args()
     if not BASE or not TOKEN:
         sys.exit("Set AAP_URL and AAP_TOKEN")
@@ -522,11 +533,12 @@ def main():
         eproj = eda_project(eda_org_id)
         ensure_activation(eda_org_id, eproj, "NetLab NetBox Changes", "netbox_events.yml",
                           [aap_cred["id"]], "NetBox changes via event stream -> NetLab - Configure Devices",
-                          stream=stream)
+                          stream=stream, recreate=a.recreate_activations)
         if sqs_cred:
             ensure_activation(eda_org_id, eproj, "NetLab NetBox Changes (AWS SQS)", "netbox_events_sqs.yml",
                               [aap_cred["id"], sqs_cred["id"]],
-                              "NetBox changes via AWS EventBridge/SQS -> NetLab - Configure Devices")
+                              "NetBox changes via AWS EventBridge/SQS -> NetLab - Configure Devices",
+                              recreate=a.recreate_activations)
 
     print("\nDone.")
     print(f"  Workflow: {BASE}/execution/templates/workflow-job-template/{wf['id']}/details")
