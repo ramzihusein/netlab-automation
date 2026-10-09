@@ -66,12 +66,21 @@ def api(method, path, body=None, ok=(200, 201, 202, 204)):
     auth = TOKEN if TOKEN.lower().startswith("bearer ") else "Bearer " + TOKEN
     req = urllib.request.Request(url, data=data, method=method, headers={
         "Authorization": auth, "Content-Type": "application/json", "Accept": "application/json"})
-    try:
-        with urllib.request.urlopen(req, context=_ctx, timeout=120) as r:
-            text = r.read().decode()
-            status = r.status
-    except urllib.error.HTTPError as e:
-        text, status = e.read().decode(), e.code
+    # Reads are retried on connection errors (gateway DNS round-robin can hit a
+    # node that resets the connection); writes are not, to avoid double-POSTs.
+    for attempt in range(3 if method == "GET" else 1):
+        try:
+            with urllib.request.urlopen(req, context=_ctx, timeout=120) as r:
+                text = r.read().decode()
+                status = r.status
+            break
+        except urllib.error.HTTPError as e:
+            text, status = e.read().decode(), e.code
+            break
+        except (urllib.error.URLError, ConnectionError):
+            if attempt == 2 or method != "GET":
+                raise
+            time.sleep(3)
     if status not in ok:
         raise ApiError(f"{method} {path} -> {status}: {text[:1500]}")
     return json.loads(text) if text else {}
@@ -446,7 +455,7 @@ def aws_event_path(org_id, eda_org_id, stack):
         ], "required": ["url", "secret"]},
         "injectors": {"extra_vars": {"aws_event_ingest_url": "{{ url }}",
                                      "aws_event_ingest_secret": "{{ secret }}"}},
-    })
+    }, update=False)   # types can't be modified once credentials use them
     ingest, _ = ensure(f"{C}/credentials/", "NetLab AWS Event Ingest", {
         "credential_type": ingest_ct["id"], "organization": org_id,
         "description": f"API Gateway endpoint of stack {stack}",
@@ -461,7 +470,7 @@ def aws_event_path(org_id, eda_org_id, stack):
         ], "required": ["access_key", "secret_key"]},
         "injectors": {"extra_vars": {"sqs_access_key": "{{ access_key }}",
                                      "sqs_secret_key": "{{ secret_key }}"}},
-    })
+    }, update=False)
     sqs, _ = ensure(f"{E}/eda-credentials/", "NetLab SQS Reader", {
         "credential_type_id": sqs_ct["id"], "organization_id": eda_org_id,
         "description": f"Reads queue {outputs['QueueName']}",
