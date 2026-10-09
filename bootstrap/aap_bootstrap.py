@@ -328,7 +328,10 @@ def job_templates(org_id, proj, ee_id, inv, creds):
             "question_name": "NetBox event path",
             "question_description": "keep = leave the active path as is (used by the Start workflow)",
             "variable": "netbox_event_path", "type": "multiplechoice",
-            "choices": ["keep", "direct", "aws"], "default": "keep", "required": True,
+            "choices": ["keep", "direct", "aws"], "default": "keep",
+            # Optional: the Start workflow launches without answers; the
+            # playbook default (keep) then applies.
+            "required": False,
         }],
     })
     return jts
