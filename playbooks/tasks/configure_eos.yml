@@ -53,7 +53,9 @@
       {%- set out = [] -%}{%- for i in intent.ifs -%}
       {%-   set c = {'name': i.name, 'enabled': i.enabled} -%}
       {%-   if i.description -%}{%- set _ = c.update({'description': i.description}) -%}{%- endif -%}
-      {%-   if i.name.startswith('Ethernet') -%}{%- set _ = c.update({'mode': 'layer2' if i.l2 else 'layer3'}) -%}{%- endif -%}
+      {#- layer2 is EOS's default and isn't shown in running-config, so only routed
+          ports carry a mode; replaced resets the rest to switched -#}
+      {%-   if i.name.startswith('Ethernet') and not i.l2 -%}{%- set _ = c.update({'mode': 'layer3'}) -%}{%- endif -%}
       {%-   set _ = out.append(c) -%}
       {%- endfor -%}{{ out }}
     state: replaced
@@ -64,7 +66,8 @@
     config: >-
       {%- set out = [] -%}{%- for p in intent.l2 -%}
       {%-   if p.mode == 'access' -%}
-      {%-     set _ = out.append({'name': p.name, 'mode': 'access', 'access': {'vlan': p.access_vlan}}) -%}
+      {#- access is the default mode and isn't displayed, so don't ask for it -#}
+      {%-     set _ = out.append({'name': p.name, 'access': {'vlan': p.access_vlan}}) -%}
       {%-   else -%}
       {%-     set _ = out.append({'name': p.name, 'mode': 'trunk',
                                   'trunk': {'trunk_allowed_vlans': p.trunk_vlans | map('string') | list}}) -%}
@@ -93,13 +96,17 @@
           {%-     set ace = {'sequence': e.seq, 'grant': e.action, 'protocol': e.protocol,
                              'source': ({'any': true} if e.src == 'any' else {'subnet_address': e.src}),
                              'destination': ({'any': true} if e.dst == 'any' else {'subnet_address': e.dst})} -%}
-          {%-     if e.dst_port is defined -%}{%- set _ = ace.destination.update({'port_protocol': {'eq': e.dst_port | string}}) -%}{%- endif -%}
+          {%-     if e.dst_port is defined -%}{%- set _ = ace.destination.update({'port_protocol': {'eq': eos_port_names[e.dst_port | string] | default(e.dst_port | string)}}) -%}{%- endif -%}
           {%-     if e.log | default(false) -%}{%- set _ = ace.update({'log': true}) -%}{%- endif -%}
           {%-     set _ = aces.append(ace) -%}
           {%-   endfor -%}
           {%-   set _ = out.append({'name': a.name, 'aces': aces}) -%}
           {%- endfor -%}{{ out }}
     state: replaced
+  vars:
+    # EOS shows well-known ports by name ("eq ssh"); NetBox data uses numbers
+    eos_port_names: {'21': ftp, '22': ssh, '23': telnet, '25': smtp, '53': domain, '80': www,
+                     '123': ntp, '161': snmp, '179': bgp, '443': https, '514': syslog}
   when: cc.acls | default([]) | length > 0
   register: r_acls
 
