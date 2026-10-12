@@ -112,12 +112,17 @@
       retries: 120
       delay: 10
 
+    # After an image rebuild the web container can take a minute to pass its
+    # healthcheck, which the workers depend on; retry rather than fail.
     - name: Start remaining NetBox services
       ansible.builtin.command: docker compose up -d --wait
       args:
         chdir: "{{ netbox_docker_dir }}"
       register: compose_up_all
-      changed_when: "'Started' in compose_up_all.stderr"
+      changed_when: "'Started' in compose_up_all.stderr or 'Recreated' in compose_up_all.stderr"
+      until: compose_up_all.rc == 0
+      retries: 10
+      delay: 15
 
     - name: Bring NetBox back after instance stop/start
       ansible.builtin.copy:
