@@ -37,14 +37,14 @@
     - name: Work out the blast radius from NetBox cabling
       ansible.builtin.set_fact:
         nb_targets: >-
-          {{ ansible_play_hosts_all if not changed_device else
-             ([changed_device] + (hostvars[changed_device].interfaces | default([])
+          {{ ansible_play_hosts_all if not _changed else
+             ([_changed] + (hostvars[_changed].interfaces | default([])
                | map(attribute='link_peers') | flatten | map(attribute='device.name') | list
-               if changed_device in hostvars else []))
+               if _changed in hostvars else []))
              | select('in', ansible_play_hosts_all) | unique | list }}
       run_once: true
       vars:
-        changed_device: "{{ changed_device | default('') }}"
+        _changed: "{{ changed_device | default('') }}"
 
     - name: Show scope
       ansible.builtin.debug:
