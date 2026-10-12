@@ -1,0 +1,6 @@
+---
+# Collections added to the supported EE (it already ships amazon.aws,
+# arista.eos, cisco.ios, ansible.netcommon, ansible.utils, ansible.posix).
+collections:
+  - name: netbox.netbox
+    version: ">=3.23.0,<4.0.0"

@@ -1,8 +1,10 @@
 ---
 # Job Template: NetLab - Populate NetBox
 # Purpose: Seeds NetBox with the lab (site, roles, platforms, devices,
-#          interfaces, IPs, cables) from vars/netlab.yml for the nodes that are
-#          actually deployed. Devices, interfaces and IPs are create-only, so
+#          interfaces, IPs, cables, VLANs, BGP sessions, config contexts) from
+#          vars/netlab.yml for the nodes that are actually deployed, using the
+#          netbox.netbox modules (runs in the "NetLab EE" execution
+#          environment, which adds pynetbox). Lab objects are create-only, so
 #          rerunning never overwrites changes made in NetBox, which is the
 #          source of truth from here on.
 #          Also proves NetBox -> device reachability.
@@ -34,24 +36,28 @@
     links: "{{ hostvars[groups['role_labhost'][0]].lab_active_links }}"
     kind_of: "{{ dict(nodes | map(attribute='name') | zip(nodes | map(attribute='kind'))) }}"
     site_slug: netlab-aws
+    kinds: "{{ nodes | map(attribute='kind') | unique | map('extract', os_kinds) | list }}"
     platform_names: {eos: Arista EOS, ios: Cisco IOS}
-    tag: [{slug: "{{ netlab_tag }}"}]
+    lookup_args: {api_endpoint: "{{ netbox_url }}", token: "{{ netbox_token }}", validate_certs: false, raw_data: true}
 
   module_defaults:
+    group/netbox.netbox.netbox:
+      netbox_url: "{{ netbox_url }}"
+      netbox_token: "{{ netbox_token }}"
+      validate_certs: false
     ansible.builtin.uri:
       headers:
         Authorization: "Token {{ netbox_token }}"
         Accept: application/json
       body_format: json
       validate_certs: false
-      timeout: 60
 
   tasks:
 
-    # Seeding creates ~40 objects; with the EDA event rule live, each would
+    # Seeding creates ~80 objects; with the EDA event rule live, each would
     # queue a Configure Devices job. Pause it here, re-enable at the end. (If
     # this run fails midway, the next Populate or Configure NetBox Webhook run
-    # turns it back on.)
+    # turns it back on.) netbox.netbox has no module for event rules.
     - name: Find the NetBox -> EDA event rule
       ansible.builtin.uri:
         url: "{{ netbox_url }}/api/extras/event-rules/?name={{ 'NetLab intent change' | urlencode }}"
@@ -64,201 +70,243 @@
         body: {enabled: false}
       when: nb_event_rule.json.count == 1 and nb_event_rule.json.results[0].enabled
 
-    # ------------------------------------------------------------ taxonomy
-    - name: Build taxonomy objects
-      ansible.builtin.set_fact:
-        nb_taxonomy:
-          - endpoint: extras/tags
-            lookup: {slug: "{{ netlab_tag }}"}
-            body: {name: "{{ netlab_tag }}", slug: "{{ netlab_tag }}", color: 2196f3, description: Managed by AAP NetLab}
-          - endpoint: dcim/sites
-            lookup: {slug: "{{ site_slug }}"}
-            body: {name: NetLab AWS, slug: "{{ site_slug }}", status: active, description: "containerlab on EC2 ({{ aws_region }})", tags: "{{ tag }}"}
-          - endpoint: dcim/device-roles
-            lookup: {slug: spine}
-            body: {name: Spine, slug: spine, color: 3f51b5}
-          - endpoint: dcim/device-roles
-            lookup: {slug: leaf}
-            body: {name: Leaf, slug: leaf, color: "009688"}
+    - name: Translate vars/netlab.yml into NetBox objects
+      ansible.builtin.include_tasks: tasks/nb_seed_model.yml
 
-    - name: Add manufacturer, device type and platform per kind
+    # NetBox is the source of truth once seeded: lab objects that already
+    # exist are skipped, so rerunning never undoes edits made in NetBox.
+    # (The shared building blocks - tags, site, roles, types, ASNs - are kept
+    # in shape on every run.)
+    - name: Read what NetBox already has
       ansible.builtin.set_fact:
-        nb_taxonomy: >-
-          {{ nb_taxonomy + [
-               {'endpoint': 'dcim/manufacturers', 'lookup': {'slug': k.manufacturer | lower},
-                'body': {'name': k.manufacturer, 'slug': k.manufacturer | lower}},
-               {'endpoint': 'dcim/device-types', 'lookup': {'slug': k.device_type | lower | regex_replace('[^a-z0-9]+', '-')},
-                'body': {'manufacturer': {'slug': k.manufacturer | lower}, 'model': k.device_type,
-                         'slug': k.device_type | lower | regex_replace('[^a-z0-9]+', '-')}},
-               {'endpoint': 'dcim/platforms', 'lookup': {'slug': k.os},
-                'body': {'name': platform_names[k.os], 'slug': k.os, 'manufacturer': {'slug': k.manufacturer | lower}}}
-             ] }}
-      loop: "{{ nodes | map(attribute='kind') | unique }}"
+        have_devices: "{{ devices }}"
+        have_interfaces: "{{ interfaces | map(attribute='device.name') | zip(interfaces | map(attribute='name')) | map('join', ' ') | list }}"
+        have_cabled: "{{ interfaces | selectattr('cable') | map(attribute='device.name') | zip(interfaces | selectattr('cable') | map(attribute='name')) | map('join', ' ') | list }}"
+        have_ips: "{{ query('netbox.netbox.nb_lookup', 'ip-addresses', **lookup_args) | map(attribute='address') | list }}"
+        have_vlans: "{{ query('netbox.netbox.nb_lookup', 'vlans', api_filter='site=' ~ site_slug, **lookup_args) | map(attribute='vid') | list }}"
+        have_prefixes: "{{ query('netbox.netbox.nb_lookup', 'prefixes', **lookup_args) | map(attribute='prefix') | list }}"
+        have_contexts: "{{ query('netbox.netbox.nb_lookup', 'config-contexts', **lookup_args) | map(attribute='name') | list }}"
+        have_sessions: "{{ query('netbox.netbox.nb_lookup', 'session', plugin='bgp', **lookup_args) | map(attribute='name') | list }}"
       vars:
-        k: "{{ os_kinds[item] }}"
+        devices: "{{ query('netbox.netbox.nb_lookup', 'devices', api_filter='site=' ~ site_slug, **lookup_args) }}"
+        interfaces: "{{ query('netbox.netbox.nb_lookup', 'interfaces', api_filter='site=' ~ site_slug, **lookup_args) }}"
 
-    - name: Ensure taxonomy
-      ansible.builtin.include_tasks: tasks/nb_ensure.yml
-      loop: "{{ nb_taxonomy }}"
+    # ------------------------------------------------------- building blocks
+    - name: Tags
+      netbox.netbox.netbox_tag:
+        data: "{{ item }}"
+      loop:
+        - {name: "{{ netlab_tag }}", slug: "{{ netlab_tag }}", color: 2196f3, description: Managed by AAP NetLab}
+        - {name: acl-servers-in, slug: acl-servers-in, color: f44336, description: Bind ACL SERVERS-IN inbound (see config context NetLab - Security policy)}
+        - {name: bgp-advertise, slug: bgp-advertise, color: 4caf50, description: Advertise this interface subnet in BGP}
+        - {name: netlab-host, slug: netlab-host, color: 9e9e9e, description: NetLab Linux test host (not managed by AAP)}
       loop_control:
-        loop_var: nb
-        label: "{{ nb.endpoint }} {{ nb.lookup }}"
+        label: "{{ item.name }}"
 
-    # ------------------------------------------------- devices + interfaces
-    - name: Build device objects
-      ansible.builtin.set_fact:
-        nb_devices: >-
-          {{ nb_devices | default([]) + [{
-               'endpoint': 'dcim/devices', 'lookup': {'name': item.name}, 'update': false,
-               'body': {'name': item.name, 'role': {'slug': item.role}, 'site': {'slug': site_slug},
-                        'device_type': {'slug': os_kinds[item.kind].device_type | lower | regex_replace('[^a-z0-9]+', '-')},
-                        'platform': {'slug': item.os}, 'status': 'active', 'tags': tag,
-                        'comments': 'containerlab kind ' ~ item.kind}}] }}
+    - name: Site
+      netbox.netbox.netbox_site:
+        data:
+          name: NetLab AWS
+          slug: "{{ site_slug }}"
+          status: active
+          description: "containerlab on EC2 ({{ aws_region }})"
+          tags: ["{{ netlab_tag }}"]
+
+    - name: Device roles
+      netbox.netbox.netbox_device_role:
+        data: "{{ item }}"
+      loop:
+        - {name: Spine, slug: spine, color: 3f51b5}
+        - {name: Leaf, slug: leaf, color: "009688"}
+        - {name: Server, slug: server, color: "795548"}
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Manufacturers
+      netbox.netbox.netbox_manufacturer:
+        data:
+          name: "{{ item }}"
+      loop: "{{ kinds | map(attribute='manufacturer') | unique | list + ['Generic'] }}"
+
+    - name: Device types
+      netbox.netbox.netbox_device_type:
+        data:
+          model: "{{ item.device_type }}"
+          slug: "{{ item.device_type | lower | regex_replace('[^a-z0-9]+', '-') }}"
+          manufacturer: "{{ item.manufacturer }}"
+      loop: "{{ kinds + [{'device_type': 'Linux container', 'manufacturer': 'Generic'}] }}"
+      loop_control:
+        label: "{{ item.device_type }}"
+
+    - name: Platforms
+      netbox.netbox.netbox_platform:
+        data:
+          name: "{{ platform_names[item.os] }}"
+          slug: "{{ item.os }}"
+          manufacturer: "{{ item.manufacturer }}"
+      loop: "{{ kinds }}"
+      loop_control:
+        label: "{{ platform_names[item.os] }}"
+
+    - name: RIR for private AS numbers
+      netbox.netbox.netbox_rir:
+        data:
+          name: Private ASNs
+          slug: private-asn
+          is_private: true
+          description: RFC 6996 private AS numbers
+
+    - name: AS numbers
+      netbox.netbox.netbox_asn:
+        data:
+          asn: "{{ item.asn }}"
+          rir: private-asn
+          description: "{{ item.role | title }} AS"
+          tags: ["{{ netlab_tag }}"]
+      loop: "{{ nodes | unique(attribute='asn') }}"
+      loop_control:
+        label: "AS{{ item.asn }}"
+
+    # ----------------------------------------------------------- lab objects
+    - name: Server VLANs
+      netbox.netbox.netbox_vlan:
+        data:
+          vid: "{{ item.vid }}"
+          name: "{{ item.name }}"
+          site: "{{ site_slug }}"
+          status: active
+          description: "{{ item.name }} servers on {{ item.leaf }}"
+          tags: ["{{ netlab_tag }}"]
+      loop: "{{ seed_vlans }}"
+      loop_control:
+        label: "VLAN {{ item.vid }} {{ item.name }}"
+      when: item.vid not in have_vlans
+
+    - name: Prefixes
+      netbox.netbox.netbox_prefix:
+        data: "{{ item | combine({'tags': [netlab_tag]}) }}"
+      loop: "{{ seed_prefixes }}"
+      loop_control:
+        label: "{{ item.prefix }}"
+      when: item.prefix not in have_prefixes
+
+    - name: Network devices
+      netbox.netbox.netbox_device:
+        data:
+          name: "{{ item.name }}"
+          role: "{{ item.role }}"
+          device_type: "{{ os_kinds[item.kind].device_type }}"
+          platform: "{{ item.os }}"
+          site: "{{ site_slug }}"
+          status: active
+          comments: "containerlab kind {{ item.kind }}"
+          tags: ["{{ netlab_tag }}"]
       loop: "{{ nodes }}"
       loop_control:
         label: "{{ item.name }}"
+      when: item.name not in have_devices | map(attribute='name')
 
-    - name: Build mgmt and loopback interfaces
-      ansible.builtin.set_fact:
-        nb_interfaces: >-
-          {{ nb_interfaces | default([]) + [
-               {'endpoint': 'dcim/interfaces', 'lookup': {'device': item.name, 'name': os_kinds[item.kind].mgmt_iface}, 'update': false,
-                'body': {'device': {'name': item.name}, 'name': os_kinds[item.kind].mgmt_iface, 'type': '1000base-t',
-                         'mgmt_only': true, 'description': 'containerlab mgmt', 'tags': tag}},
-               {'endpoint': 'dcim/interfaces', 'lookup': {'device': item.name, 'name': 'Loopback0'}, 'update': false,
-                'body': {'device': {'name': item.name}, 'name': 'Loopback0', 'type': 'virtual',
-                         'description': 'router-id', 'tags': tag}}
-             ] }}
+    - name: Test hosts
+      netbox.netbox.netbox_device:
+        data:
+          name: "{{ item.name }}"
+          role: server
+          device_type: Linux container
+          site: "{{ site_slug }}"
+          status: active
+          comments: "containerlab linux node, VLAN {{ item.vid }} on {{ item.leaf }}"
+          tags: [netlab-host]
+      loop: "{{ seed_hosts }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: item.name not in have_devices | map(attribute='name')
+
+    - name: Interfaces
+      netbox.netbox.netbox_device_interface:
+        data: "{{ item }}"
+      loop: "{{ seed_interfaces }}"
+      loop_control:
+        label: "{{ item.device }} {{ item.name }}"
+      when: (item.device ~ ' ' ~ item.name) not in have_interfaces
+
+    - name: IP addresses
+      netbox.netbox.netbox_ip_address:
+        data:
+          address: "{{ item.address }}"
+          status: active
+          role: "{{ item.role | default(omit) }}"
+          description: "{{ item.description | default(omit) }}"
+          tags: "{{ item.tags }}"
+          assigned_object:
+            device: "{{ item.device }}"
+            name: "{{ item.interface }}"
+      loop: "{{ seed_ips }}"
+      loop_control:
+        label: "{{ item.address }} on {{ item.device }} {{ item.interface }}"
+      when: item.address not in have_ips
+
+    - name: Management IP as each device's primary IPv4 (if it has none)
+      netbox.netbox.netbox_device:
+        data:
+          name: "{{ item.name }}"
+          primary_ip4: "{{ item.mgmt_ip }}/{{ lab_mgmt_prefixlen }}"
       loop: "{{ nodes }}"
       loop_control:
-        label: "{{ item.name }}"
+        label: "{{ item.name }} {{ item.mgmt_ip }}"
+      when: item.name not in have_devices | selectattr('primary_ip4') | map(attribute='name')
 
-    - name: Build point-to-point interfaces
-      ansible.builtin.set_fact:
-        nb_interfaces: >-
-          {{ nb_interfaces + [
-               {'endpoint': 'dcim/interfaces', 'lookup': {'device': item.a, 'name': a_if}, 'update': false,
-                'body': {'device': {'name': item.a}, 'name': a_if, 'type': '1000base-t',
-                         'description': 'to ' ~ item.b ~ ' ' ~ b_if, 'tags': tag}},
-               {'endpoint': 'dcim/interfaces', 'lookup': {'device': item.b, 'name': b_if}, 'update': false,
-                'body': {'device': {'name': item.b}, 'name': b_if, 'type': '1000base-t',
-                         'description': 'to ' ~ item.a ~ ' ' ~ a_if, 'tags': tag}}
-             ] }}
-      loop: "{{ links }}"
+    - name: Cables
+      netbox.netbox.netbox_cable:
+        data:
+          termination_a_type: dcim.interface
+          termination_a: {device: "{{ item.a_device }}", name: "{{ item.a_if }}"}
+          termination_b_type: dcim.interface
+          termination_b: {device: "{{ item.b_device }}", name: "{{ item.b_if }}"}
+          status: connected
+          tags: "{{ item.tags }}"
+      loop: "{{ seed_cables }}"
       loop_control:
-        label: "{{ item.a }} <-> {{ item.b }}"
-      vars:
-        a_if: "{{ os_kinds[kind_of[item.a]].iface_prefix ~ (item.a_port + os_kinds[kind_of[item.a]].iface_offset) }}"
-        b_if: "{{ os_kinds[kind_of[item.b]].iface_prefix ~ (item.b_port + os_kinds[kind_of[item.b]].iface_offset) }}"
+        label: "{{ item.a_device }} {{ item.a_if }} <-> {{ item.b_device }} {{ item.b_if }}"
+      when: (item.a_device ~ ' ' ~ item.a_if) not in have_cabled
 
-    - name: Ensure devices and interfaces
-      ansible.builtin.include_tasks: tasks/nb_ensure.yml
-      loop: "{{ nb_devices + nb_interfaces }}"
-      loop_control:
-        loop_var: nb
-        label: "{{ nb.endpoint }} {{ nb.lookup.values() | join(' ') }}"
-
-    - name: Read lab interfaces
+    # ---------------------------------------------------------- BGP + policy
+    # Sessions live in the netbox-bgp plugin, which netbox.netbox has no
+    # module for, so these go to the plugin's REST API.
+    - name: BGP sessions
       ansible.builtin.uri:
-        url: "{{ netbox_url }}/api/dcim/interfaces/?site={{ site_slug }}&limit=1000"
-      register: nb_iface_list
-
-    - name: Index interfaces by device|name
-      ansible.builtin.set_fact:
-        nb_iface: "{{ nb_iface | default({}) | combine({item.device.name ~ '|' ~ item.name: item}) }}"
-      loop: "{{ nb_iface_list.json.results }}"
-      loop_control:
-        label: "{{ item.device.name }} {{ item.name }}"
-
-    # ------------------------------------------------------------- addresses
-    - name: Build mgmt and loopback IPs
-      ansible.builtin.set_fact:
-        nb_ips: >-
-          {{ nb_ips | default([]) + [
-               {'endpoint': 'ipam/ip-addresses', 'lookup': {'address': item.mgmt_ip ~ '/' ~ lab_mgmt_prefixlen}, 'update': false,
-                'body': {'address': item.mgmt_ip ~ '/' ~ lab_mgmt_prefixlen, 'status': 'active', 'tags': tag,
-                         'description': item.name ~ ' mgmt', 'assigned_object_type': 'dcim.interface',
-                         'assigned_object_id': nb_iface[item.name ~ '|' ~ os_kinds[item.kind].mgmt_iface].id}},
-               {'endpoint': 'ipam/ip-addresses', 'lookup': {'address': item.loopback}, 'update': false,
-                'body': {'address': item.loopback, 'status': 'active', 'role': 'loopback', 'tags': tag,
-                         'description': item.name ~ ' router-id', 'assigned_object_type': 'dcim.interface',
-                         'assigned_object_id': nb_iface[item.name ~ '|Loopback0'].id}}
-             ] }}
-      loop: "{{ nodes }}"
-      loop_control:
-        label: "{{ item.name }}"
-
-    - name: Build point-to-point IPs
-      ansible.builtin.set_fact:
-        nb_ips: >-
-          {{ nb_ips + [
-               {'endpoint': 'ipam/ip-addresses', 'lookup': {'address': item.a_ip}, 'update': false,
-                'body': {'address': item.a_ip, 'status': 'active', 'tags': tag, 'assigned_object_type': 'dcim.interface',
-                         'assigned_object_id': nb_iface[item.a ~ '|' ~ a_if].id}},
-               {'endpoint': 'ipam/ip-addresses', 'lookup': {'address': item.b_ip}, 'update': false,
-                'body': {'address': item.b_ip, 'status': 'active', 'tags': tag, 'assigned_object_type': 'dcim.interface',
-                         'assigned_object_id': nb_iface[item.b ~ '|' ~ b_if].id}}
-             ] }}
-      loop: "{{ links }}"
-      loop_control:
-        label: "{{ item.a }} <-> {{ item.b }}"
-      vars:
-        a_if: "{{ os_kinds[kind_of[item.a]].iface_prefix ~ (item.a_port + os_kinds[kind_of[item.a]].iface_offset) }}"
-        b_if: "{{ os_kinds[kind_of[item.b]].iface_prefix ~ (item.b_port + os_kinds[kind_of[item.b]].iface_offset) }}"
-
-    - name: Ensure IP addresses
-      ansible.builtin.include_tasks: tasks/nb_ensure.yml
-      loop: "{{ nb_ips }}"
-      loop_control:
-        loop_var: nb
-        label: "{{ nb.lookup.address }}"
-
-    - name: Read lab devices
-      ansible.builtin.uri:
-        url: "{{ netbox_url }}/api/dcim/devices/?site={{ site_slug }}&limit=1000"
-      register: nb_device_list
-
-    - name: Read lab IPs
-      ansible.builtin.uri:
-        url: "{{ netbox_url }}/api/ipam/ip-addresses/?tag={{ netlab_tag }}&limit=1000"
-      register: nb_ip_list
-
-    - name: Set mgmt IP as primary IPv4 (only if none set)
-      ansible.builtin.uri:
-        url: "{{ netbox_url }}/api/dcim/devices/{{ item.id }}/"
-        method: PATCH
-        body:
-          primary_ip4: "{{ (nb_ip_list.json.results | selectattr('address', 'equalto', mgmt_cidr) | first).id }}"
-      changed_when: true
-      loop: "{{ nb_device_list.json.results | selectattr('name', 'in', kind_of.keys() | list) | selectattr('primary_ip4', 'none') | list }}"
-      loop_control:
-        label: "{{ item.name }}"
-      vars:
-        mgmt_cidr: "{{ (nodes | selectattr('name', 'equalto', item.name) | first).mgmt_ip ~ '/' ~ lab_mgmt_prefixlen }}"
-
-    # ---------------------------------------------------------------- cables
-    - name: Cable point-to-point links (skip if already cabled)
-      ansible.builtin.uri:
-        url: "{{ netbox_url }}/api/dcim/cables/"
+        url: "{{ netbox_url }}/api/plugins/bgp/session/"
         method: POST
         status_code: 201
         body:
-          status: connected
-          tags: "{{ tag }}"
-          a_terminations: [{object_type: dcim.interface, object_id: "{{ nb_iface[item.a ~ '|' ~ a_if].id }}"}]
-          b_terminations: [{object_type: dcim.interface, object_id: "{{ nb_iface[item.b ~ '|' ~ b_if].id }}"}]
+          name: "{{ item.name }}"
+          description: "{{ item.description }}"
+          device: {name: "{{ item.device }}"}
+          site: {slug: "{{ site_slug }}"}
+          status: active
+          local_address: {address: "{{ item.local_address }}"}
+          local_as: {asn: "{{ item.local_as }}"}
+          remote_address: {address: "{{ item.remote_address }}"}
+          remote_as: {asn: "{{ item.remote_as }}"}
+          tags: [{slug: "{{ netlab_tag }}"}]
       changed_when: true
-      when: nb_iface[item.a ~ '|' ~ a_if].cable is none
-      loop: "{{ links }}"
+      loop: "{{ seed_sessions }}"
       loop_control:
-        label: "{{ item.a }}:{{ a_if }} <-> {{ item.b }}:{{ b_if }}"
-      vars:
-        a_if: "{{ os_kinds[kind_of[item.a]].iface_prefix ~ (item.a_port + os_kinds[kind_of[item.a]].iface_offset) }}"
-        b_if: "{{ os_kinds[kind_of[item.b]].iface_prefix ~ (item.b_port + os_kinds[kind_of[item.b]].iface_offset) }}"
+        label: "{{ item.name }}"
+      when: item.name not in have_sessions
 
-    # ------------------------------------------------- fabric design + policy
-    - name: Seed BGP, VLANs, gateways, test hosts and config contexts
-      ansible.builtin.include_tasks: tasks/nb_fabric.yml
+    - name: Config contexts (services, security policy, routing)
+      netbox.netbox.netbox_config_context:
+        data:
+          name: "{{ item.name }}"
+          weight: "{{ item.weight }}"
+          description: "{{ item.description }}"
+          is_active: true
+          tags: ["{{ netlab_tag }}"]
+          data: "{{ item.data | to_json }}"
+      loop: "{{ lab_config_contexts }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: item.name not in have_contexts
 
     - name: Re-enable the event rule
       ansible.builtin.uri:
@@ -269,7 +317,10 @@
 
     - name: Print NetBox summary
       ansible.builtin.debug:
-        msg: "NetBox has {{ nb_device_list.json.count }} lab devices, {{ nb_ip_list.json.count }} IPs ({{ netbox_url }})"
+        msg: >-
+          NetBox has {{ query('netbox.netbox.nb_lookup', 'devices', api_filter='site=' ~ site_slug, **lookup_args) | length }}
+          lab devices and {{ query('netbox.netbox.nb_lookup', 'session', plugin='bgp', **lookup_args) | length }}
+          BGP sessions ({{ netbox_url }})
 
 
 - name: NetLab — verify NetBox can reach the devices

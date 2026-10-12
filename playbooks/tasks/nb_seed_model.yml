@@ -1,0 +1,137 @@
+---
+# Translate the seed topology in vars/netlab.yml into flat lists of NetBox
+# objects, so 05_populate_netbox.yml can hand each list straight to a
+# netbox.netbox module. This is the only place that works out interface names:
+# containerlab endpoints are ethN, NetBox and the devices use the NOS name
+# (iface_prefix ~ (N + iface_offset), e.g. Ethernet1 or GigabitEthernet2).
+#
+# Uses from the including play: nodes, links, kind_of, site_slug
+# Sets: seed_vlans, seed_prefixes, seed_interfaces, seed_ips, seed_cables,
+#       seed_sessions
+
+- name: Work out which VLANs and test hosts belong to deployed leaves
+  ansible.builtin.set_fact:
+    seed_vlans: "{{ lab_vlans | selectattr('leaf', 'in', kind_of.keys() | list) | list }}"
+    seed_hosts: "{{ lab_hosts | selectattr('leaf', 'in', kind_of.keys() | list) | list }}"
+
+- name: Name every port in the topology after its NOS
+  ansible.builtin.set_fact:
+    port_name: >-
+      {%- set out = {} -%}
+      {%- for l in links -%}
+      {%-   set _ = out.update({
+              l.a ~ '|' ~ l.a_port: os_kinds[kind_of[l.a]].iface_prefix ~ (l.a_port + os_kinds[kind_of[l.a]].iface_offset),
+              l.b ~ '|' ~ l.b_port: os_kinds[kind_of[l.b]].iface_prefix ~ (l.b_port + os_kinds[kind_of[l.b]].iface_offset)}) -%}
+      {%- endfor -%}
+      {%- for h in seed_hosts -%}
+      {%-   set _ = out.update({h.leaf ~ '|' ~ h.leaf_port: os_kinds[kind_of[h.leaf]].iface_prefix ~ (h.leaf_port + os_kinds[kind_of[h.leaf]].iface_offset)}) -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Build the prefix list (fabric pools + one per server VLAN)
+  ansible.builtin.set_fact:
+    seed_prefixes: >-
+      {%- set out = [
+        {'prefix': '192.168.254.0/24', 'status': 'container', 'description': 'Fabric point-to-point /31s'},
+        {'prefix': '192.168.255.0/24', 'status': 'container', 'description': 'Loopbacks / router IDs'},
+        {'prefix': '172.16.0.0/16', 'status': 'container', 'description': 'Server VLANs'}] -%}
+      {%- for v in seed_vlans -%}
+      {%-   set _ = out.append({'prefix': v.gateway | ansible.utils.ipaddr('network/prefix'), 'status': 'active',
+                                'vlan': {'vid': v.vid, 'site': site_slug}, 'description': v.name ~ ' (VLAN ' ~ v.vid ~ ')'}) -%}
+      {%- endfor -%}
+      {{ out }}
+
+# Order matters: a subinterface's parent must exist first.
+- name: Build the interface list
+  ansible.builtin.set_fact:
+    seed_interfaces: >-
+      {%- set out = [] -%}
+      {%- for n in nodes -%}
+      {%-   set _ = out.append({'device': n.name, 'name': os_kinds[n.kind].mgmt_iface, 'type': '1000base-t',
+                                'mgmt_only': true, 'description': 'containerlab mgmt', 'tags': [netlab_tag]}) -%}
+      {%-   set _ = out.append({'device': n.name, 'name': 'Loopback0', 'type': 'virtual',
+                                'description': 'router-id', 'tags': [netlab_tag, 'bgp-advertise']}) -%}
+      {%- endfor -%}
+      {%- for l in links -%}
+      {%-   set a_if = port_name[l.a ~ '|' ~ l.a_port] -%}{%- set b_if = port_name[l.b ~ '|' ~ l.b_port] -%}
+      {%-   set _ = out.append({'device': l.a, 'name': a_if, 'type': '1000base-t', 'description': 'to ' ~ l.b ~ ' ' ~ b_if, 'tags': [netlab_tag]}) -%}
+      {%-   set _ = out.append({'device': l.b, 'name': b_if, 'type': '1000base-t', 'description': 'to ' ~ l.a ~ ' ' ~ a_if, 'tags': [netlab_tag]}) -%}
+      {%- endfor -%}
+      {%- for h in seed_hosts -%}
+      {%-   set port = port_name[h.leaf ~ '|' ~ h.leaf_port] -%}
+      {%-   set leaf_vlans = seed_vlans | selectattr('leaf', 'equalto', h.leaf) | list -%}
+      {%-   set intf = {'device': h.leaf, 'name': port, 'type': '1000base-t', 'description': 'to ' ~ h.name ~ ' eth1', 'tags': [netlab_tag]} -%}
+      {%-   if os_kinds[kind_of[h.leaf]].os == 'eos' -%}
+      {%-     set _ = intf.update({'mode': 'access', 'untagged_vlan': {'vid': h.vid, 'site': site_slug}}) -%}
+      {%-   else -%}
+      {%-     set tagged = [] -%}
+      {%-     for v in leaf_vlans -%}{%- set _ = tagged.append({'vid': v.vid, 'site': site_slug}) -%}{%- endfor -%}
+      {%-     set _ = intf.update({'mode': 'tagged', 'tagged_vlans': tagged}) -%}
+      {%-   endif -%}
+      {%-   set _ = out.append(intf) -%}
+      {%-   set _ = out.append({'device': h.name, 'name': 'eth1', 'type': '1000base-t', 'tags': ['netlab-host']}) -%}
+      {%- endfor -%}
+      {%- for v in seed_vlans -%}
+      {%-   set h = seed_hosts | selectattr('leaf', 'equalto', v.leaf) | first -%}
+      {%-   if os_kinds[kind_of[v.leaf]].os == 'eos' -%}
+      {%-     set _ = out.append({'device': v.leaf, 'name': 'Vlan' ~ v.vid, 'type': 'virtual', 'description': v.name ~ ' gateway',
+                                  'tags': [netlab_tag, 'acl-servers-in', 'bgp-advertise']}) -%}
+      {%-   else -%}
+      {%-     set port = port_name[v.leaf ~ '|' ~ h.leaf_port] -%}
+      {%-     set _ = out.append({'device': v.leaf, 'name': port ~ '.' ~ v.vid, 'type': 'virtual', 'description': v.name ~ ' gateway',
+                                  'parent_interface': {'device': v.leaf, 'name': port},
+                                  'mode': 'access', 'untagged_vlan': {'vid': v.vid, 'site': site_slug},
+                                  'tags': [netlab_tag, 'acl-servers-in', 'bgp-advertise']}) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Build the IP address list
+  ansible.builtin.set_fact:
+    seed_ips: >-
+      {%- set out = [] -%}
+      {%- for n in nodes -%}
+      {%-   set _ = out.append({'address': n.mgmt_ip ~ '/' ~ lab_mgmt_prefixlen, 'device': n.name, 'interface': os_kinds[n.kind].mgmt_iface,
+                                'description': n.name ~ ' mgmt', 'tags': [netlab_tag]}) -%}
+      {%-   set _ = out.append({'address': n.loopback, 'device': n.name, 'interface': 'Loopback0', 'role': 'loopback',
+                                'description': n.name ~ ' router-id', 'tags': [netlab_tag]}) -%}
+      {%- endfor -%}
+      {%- for l in links -%}
+      {%-   set _ = out.append({'address': l.a_ip, 'device': l.a, 'interface': port_name[l.a ~ '|' ~ l.a_port], 'tags': [netlab_tag]}) -%}
+      {%-   set _ = out.append({'address': l.b_ip, 'device': l.b, 'interface': port_name[l.b ~ '|' ~ l.b_port], 'tags': [netlab_tag]}) -%}
+      {%- endfor -%}
+      {%- for v in seed_vlans -%}
+      {%-   set h = seed_hosts | selectattr('leaf', 'equalto', v.leaf) | first -%}
+      {%-   set gw_if = 'Vlan' ~ v.vid if os_kinds[kind_of[v.leaf]].os == 'eos' else port_name[v.leaf ~ '|' ~ h.leaf_port] ~ '.' ~ v.vid -%}
+      {%-   set _ = out.append({'address': v.gateway, 'device': v.leaf, 'interface': gw_if, 'description': v.name ~ ' gateway', 'tags': [netlab_tag]}) -%}
+      {%- endfor -%}
+      {%- for h in seed_hosts -%}
+      {%-   set _ = out.append({'address': h.ip, 'device': h.name, 'interface': 'eth1', 'description': h.name ~ ' (VLAN ' ~ h.vid ~ ')', 'tags': ['netlab-host']}) -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Build the cable list
+  ansible.builtin.set_fact:
+    seed_cables: >-
+      {%- set out = [] -%}
+      {%- for l in links -%}
+      {%-   set _ = out.append({'a_device': l.a, 'a_if': port_name[l.a ~ '|' ~ l.a_port], 'b_device': l.b, 'b_if': port_name[l.b ~ '|' ~ l.b_port], 'tags': [netlab_tag]}) -%}
+      {%- endfor -%}
+      {%- for h in seed_hosts -%}
+      {%-   set _ = out.append({'a_device': h.leaf, 'a_if': port_name[h.leaf ~ '|' ~ h.leaf_port], 'b_device': h.name, 'b_if': 'eth1', 'tags': ['netlab-host']}) -%}
+      {%- endfor -%}
+      {{ out }}
+
+# One session per side of every fabric link, named "<device> to <peer>".
+- name: Build the BGP session list
+  ansible.builtin.set_fact:
+    seed_sessions: >-
+      {%- set asn = dict(nodes | map(attribute='name') | zip(nodes | map(attribute='asn'))) -%}
+      {%- set out = [] -%}
+      {%- for l in links -%}
+      {%-   for me, my_port, my_ip, peer, peer_port, peer_ip in [(l.a, l.a_port, l.a_ip, l.b, l.b_port, l.b_ip), (l.b, l.b_port, l.b_ip, l.a, l.a_port, l.a_ip)] -%}
+      {%-     set _ = out.append({'name': me ~ ' to ' ~ peer, 'device': me, 'description': peer ~ ':' ~ port_name[peer ~ '|' ~ peer_port],
+                                  'local_address': my_ip, 'local_as': asn[me], 'remote_address': peer_ip, 'remote_as': asn[peer]}) -%}
+      {%-   endfor -%}
+      {%- endfor -%}
+      {{ out }}

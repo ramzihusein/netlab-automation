@@ -28,6 +28,8 @@ REPO_URL = "https://github.com/ramzihusein/netlab-automation.git"
 BRANCH = "main"
 ORG = "Default"
 EE = "Default execution environment"
+NETLAB_EE = "NetLab EE"            # built from ee/execution-environment.yml
+HUB_REGISTRY = "gateway.aap.ramzidev.com"
 DE = "Default Decision Environment"
 AWS_CRED = "AWS Creds"
 SSH_CRED = "EC2"
@@ -168,7 +170,51 @@ def credential_types():
             "eda_event_stream_token": "{{ token }}",
         }},
     })
-    return netbox, stream
+    login, _ = ensure(f"{C}/credential_types/", "Container Registry Login", {
+        "kind": "cloud",
+        "description": "Registry host + login as playbook vars (for building and pushing EEs)",
+        "inputs": {"fields": [
+            {"id": "host", "label": "Registry host", "type": "string"},
+            {"id": "username", "label": "Username", "type": "string"},
+            {"id": "password", "label": "Password", "type": "string", "secret": True},
+        ], "required": ["host", "username", "password"]},
+        "injectors": {"extra_vars": {
+            "ee_registry": "{{ host }}",
+            "ee_registry_username": "{{ username }}",
+            "ee_registry_password": "{{ password }}",
+        }},
+    })
+    return netbox, stream, login
+
+
+def hub_registry(org_id, login_ct):
+    """Hub login twice over: a Container Registry credential so AAP can pull the
+    NetLab EE, and a Container Registry Login so the build job can push it."""
+    print("Automation hub registry")
+    pull, push = find(f"{C}/credentials/", "NetLab Hub Registry"), find(f"{C}/credentials/", "NetLab Hub Push")
+    if pull is None or push is None:
+        user, password = os.environ.get("HUB_USERNAME"), os.environ.get("HUB_PASSWORD")
+        if not user or not password:
+            sys.exit("Set HUB_USERNAME and HUB_PASSWORD (automation hub login) for the first run")
+        registry = api("GET", f"{C}/credential_types/?namespace=registry")["results"][0]
+        pull, _ = ensure(f"{C}/credentials/", "NetLab Hub Registry", {
+            "credential_type": registry["id"], "organization": org_id,
+            "description": "Pull the NetLab EE from the automation hub",
+            "inputs": {"host": HUB_REGISTRY, "username": user, "password": password, "verify_ssl": False},
+        })
+        push, _ = ensure(f"{C}/credentials/", "NetLab Hub Push", {
+            "credential_type": login_ct["id"], "organization": org_id,
+            "description": "Push the NetLab EE to the automation hub (NetLab - Build Execution Environment)",
+            "inputs": {"host": HUB_REGISTRY, "username": user, "password": password},
+        })
+    else:
+        print("  = credentials: NetLab Hub Registry / NetLab Hub Push (secrets kept)")
+    ee, _ = ensure(f"{C}/execution_environments/", NETLAB_EE, {
+        "organization": org_id, "image": f"{HUB_REGISTRY}/netlab-ee:latest", "pull": "always",
+        "credential": pull["id"],
+        "description": "Supported EE + netbox.netbox and pynetbox (ee/execution-environment.yml)",
+    })
+    return push, ee
 
 
 def eda_side(org_id, stream_ct):
@@ -282,7 +328,7 @@ def inventories(org_id, proj, aws_id, nb_cred):
     return infra, devices
 
 
-def job_templates(org_id, proj, ee_id, inv, creds):
+def job_templates(org_id, proj, ee_id, netlab_ee_id, inv, creds):
     print("Job templates")
     pv = {k: PROVISION_VARS[k] for k in ("vpc_id", "route_table_id", "route53_zone_id")}
     specs = [
@@ -292,7 +338,9 @@ def job_templates(org_id, proj, ee_id, inv, creds):
         ("NetLab - Deploy Lab", "playbooks/03_deploy_lab.yml", "infra", ["ssh"],
          {"ask_variables_on_launch": True}),
         ("NetLab - Install NetBox", "playbooks/04_install_netbox.yml", "infra", ["ssh", "netbox"], {}),
-        ("NetLab - Populate NetBox", "playbooks/05_populate_netbox.yml", "infra", ["ssh", "netbox"], {}),
+        # netbox.netbox modules need pynetbox, which only the NetLab EE has.
+        ("NetLab - Populate NetBox", "playbooks/05_populate_netbox.yml", "infra", ["ssh", "netbox"],
+         {"execution_environment": netlab_ee_id}),
         ("NetLab - Configure Devices", "playbooks/configure_network.yml", "devices", ["devices", "netbox"],
          {"ask_limit_on_launch": True, "ask_variables_on_launch": True}),
         # Same playbook in check + diff mode: reports drift from NetBox, changes nothing.
@@ -311,6 +359,7 @@ def job_templates(org_id, proj, ee_id, inv, creds):
          {"ask_limit_on_launch": True, "ask_variables_on_launch": True}),
         ("NetLab - Configure NetBox Webhook", "playbooks/07_configure_netbox_webhook.yml", "infra",
          ["ssh", "netbox", "stream", "ingest"], {"survey_enabled": True}),
+        ("NetLab - Build Execution Environment", "playbooks/09_build_ee.yml", "infra", ["ssh", "hub_push"], {}),
         ("NetLab - Stop", "playbooks/08_stop_netlab.yml", "local", ["aws"],
          {"ask_variables_on_launch": True}),
         ("NetLab - Teardown", "playbooks/99_teardown.yml", "local", ["aws"],
@@ -519,7 +568,7 @@ def main():
 
     org_id = find(f"{C}/organizations/", ORG)["id"]
     eda_org_id = find(f"{E}/organizations/", ORG)["id"]
-    netbox_ct, stream_ct = credential_types()
+    netbox_ct, stream_ct, login_ct = credential_types()
     nb_cred, dev_cred = controller_credentials(org_id, netbox_ct, a.secrets_out)
     aap_cred = stream = None
     if not a.skip_eda:
@@ -529,6 +578,7 @@ def main():
     if a.netbox_events_stack and not a.skip_eda:
         ingest, sqs_cred = aws_event_path(org_id, eda_org_id, a.netbox_events_stack)
 
+    hub_push, netlab_ee = hub_registry(org_id, login_ct)
     proj = project(org_id)
     infra, devices = inventories(org_id, proj, find(f"{C}/credentials/", AWS_CRED)["id"], nb_cred)
     inv = {"local": find(f"{C}/inventories/", LOCAL_INVENTORY)["id"], "infra": infra["id"],
@@ -537,10 +587,10 @@ def main():
              "ssh": find(f"{C}/credentials/", SSH_CRED)["id"],
              "netbox": nb_cred["id"], "devices": dev_cred["id"],
              "stream": stream_target["id"] if stream_target else None,
-             "ingest": ingest["id"] if ingest else None}
+             "ingest": ingest["id"] if ingest else None, "hub_push": hub_push["id"]}
     if creds["stream"] is None:
         sys.exit("NetLab EDA Event Stream credential missing; run without --skip-eda first")
-    jts = job_templates(org_id, proj, find(f"{C}/execution_environments/", EE)["id"], inv, creds)
+    jts = job_templates(org_id, proj, find(f"{C}/execution_environments/", EE)["id"], netlab_ee["id"], inv, creds)
     wf = workflow(org_id, jts)
     if not a.skip_eda:
         print("EDA project + rulebook activations")

@@ -1,0 +1,83 @@
+---
+# Job Template: NetLab - Build Execution Environment
+# Purpose: Builds the NetLab EE from ee/execution-environment.yml with
+#          ansible-builder v3 on the lab host, and pushes it to the private
+#          automation hub that AAP pulls execution environments from.
+#
+# Required AAP Credential: "NetLab Hub Registry" type, which injects
+#   ee_registry, ee_registry_username, ee_registry_password
+
+- name: NetLab — build the execution environment
+  hosts: role_labhost
+  become: true
+  gather_facts: false
+
+  vars:
+    builder_dir: /opt/ansible-builder
+    build_dir: /opt/netlab/ee
+    ee_image: "{{ ee_registry }}/netlab-ee"
+
+  tasks:
+
+    - name: Pick a dated tag for this build (kept next to :latest for rollback)
+      ansible.builtin.set_fact:
+        ee_tag: "{{ now(utc=true, fmt='%Y%m%d-%H%M') }}"
+
+    - name: Install podman and Python venv support
+      ansible.builtin.apt:
+        name: [podman, python3-venv]
+        update_cache: true
+        lock_timeout: 300
+
+    - name: Install ansible-builder v3
+      ansible.builtin.pip:
+        name: ansible-builder>=3.1,<4
+        virtualenv: "{{ builder_dir }}"
+        virtualenv_command: python3 -m venv
+
+    - name: Copy the EE definition from the project
+      ansible.builtin.copy:
+        src: ../ee/
+        dest: "{{ build_dir }}/"
+        mode: "0644"
+
+    # The hub uses AAP's self-signed certificate.
+    - name: Log in to the automation hub registry
+      ansible.builtin.command: >-
+        podman login --tls-verify=false
+        --username {{ ee_registry_username }} --password-stdin {{ ee_registry }}
+      args:
+        stdin: "{{ ee_registry_password }}"
+      changed_when: false
+      no_log: true
+
+    - name: Build the image
+      ansible.builtin.command: >-
+        {{ builder_dir }}/bin/ansible-builder build
+        --file execution-environment.yml
+        --container-runtime podman
+        --tag {{ ee_image }}:latest
+        --tag {{ ee_image }}:{{ ee_tag }}
+        --extra-build-cli-args=--tls-verify=false
+        --verbosity 2
+      args:
+        chdir: "{{ build_dir }}"
+      changed_when: true
+
+    - name: Check the collection and pynetbox are in the image
+      ansible.builtin.command: >-
+        podman run --rm {{ ee_image }}:latest
+        bash -c "ansible-galaxy collection list netbox.netbox && python3 -c 'import pynetbox; print(\"pynetbox\", pynetbox.__version__)'"
+      register: ee_check
+      changed_when: false
+
+    - name: Push the image to the hub
+      ansible.builtin.command: podman push --tls-verify=false {{ ee_image }}:{{ item }}
+      loop: ["{{ ee_tag }}", latest]
+      changed_when: true
+
+    - name: Print the result
+      ansible.builtin.debug:
+        msg:
+          - "Pushed {{ ee_image }}:latest (and :{{ ee_tag }})"
+          - "{{ ee_check.stdout_lines }}"

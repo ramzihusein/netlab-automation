@@ -1,7 +1,7 @@
 ---
 # Idempotently create or update one NetBox object over the REST API.
-# The netbox.netbox modules need pynetbox, which the supported EE doesn't ship,
-# so this uses plain uri calls.
+# Used for webhooks and event rules (07), which netbox.netbox can only partly
+# manage; plain uri calls keep that playbook on the default EE.
 #
 # Input (loop_var nb):
 #   nb.endpoint  e.g. dcim/devices
