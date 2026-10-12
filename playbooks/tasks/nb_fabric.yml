@@ -42,7 +42,8 @@
   ansible.builtin.uri:
     url: "{{ netbox_url }}/api/dcim/devices/{{ item.id }}/"
     method: PATCH
-    body: {custom_fields: {bgp_asn: "{{ (nodes | selectattr('name', 'equalto', item.name) | first).asn | int }}"}}
+    # One expression so the ASN stays an integer (NetBox rejects "65000")
+    body: "{{ {'custom_fields': {'bgp_asn': (nodes | selectattr('name', 'equalto', item.name) | first).asn | int}} }}"
   changed_when: true
   when: item.custom_fields.bgp_asn | default(none) is none
   loop: "{{ fab_devices.json.results | selectattr('name', 'in', active_names) | list }}"
