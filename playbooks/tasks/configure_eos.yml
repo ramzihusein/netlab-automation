@@ -117,9 +117,14 @@
       {%-   set _ = out.append({'name': b.name, 'access_groups': [{'afi': 'ipv4', 'acls': [{'name': b.acl, 'direction': b.direction}]}]}) -%}
       {%- endfor -%}{{ out }}
     state: overridden
-  # eos_acl_interfaces crashes on state deleted when nothing is bound, so a
-  # device with no tagged interfaces in NetBox (the spines) skips this.
-  when: intent.acl_bindings | length > 0
+  # cEOS-lab has no data-plane ACL support: "ip access-group" is rejected with
+  # "not supported on this hardware platform" (and the module doesn't surface
+  # it), so bindings are only pushed when eos_acl_bindings=true, e.g. on real
+  # Arista hardware or vEOS. The ACLs themselves are still configured.
+  # (Also skipped with no bindings: eos_acl_interfaces crashes on deleted.)
+  when:
+    - intent.acl_bindings | length > 0
+    - eos_acl_bindings | default(false) | bool
   register: r_acl_bind
 
 - name: BGP
