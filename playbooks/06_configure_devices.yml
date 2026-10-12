@@ -92,7 +92,7 @@
           {%-   set is_l2 = i.mode is not none and '.' not in i.name and not i.name.startswith('Vlan') -%}
           {%-   set _ = ifs.append({'name': i.name, 'enabled': i.enabled, 'description': i.description, 'l2': is_l2}) -%}
           {%-   if is_l2 -%}
-          {%-     set _ = l2.append({'name': i.name, 'mode': i.mode,
+          {%-     set _ = l2.append({'name': i.name, 'mode': (i.mode.value if i.mode is mapping else i.mode),
                                       'access_vlan': (i.untagged_vlan.vid if i.untagged_vlan else none),
                                       'trunk_vlans': i.tagged_vlans | map(attribute='vid') | list}) -%}
           {%-     set _ = vids.extend(([i.untagged_vlan.vid] if i.untagged_vlan else []) + (i.tagged_vlans | map(attribute='vid') | list)) -%}
@@ -110,7 +110,7 @@
           {%-     set pas = hostvars[p.device.name].custom_fields.bgp_asn | default(none) -%}
           {%-     if pv4 and pas -%}
           {%-       set _ = nbrs.append({'ip': pv4[0].split('/')[0], 'asn': pas | string,
-                                         'description': p.device.name ~ ' ' ~ p.name}) -%}
+                                         'description': p.device.name ~ ':' ~ p.name}) -%}
           {%-     endif -%}
           {%-   elif v4 -%}
           {%-     set _ = nets.extend(v4 | map('ansible.utils.ipaddr', 'network/prefix') | list) -%}

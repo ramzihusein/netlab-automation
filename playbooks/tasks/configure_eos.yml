@@ -42,7 +42,7 @@
   vars:
     eos_vlans: >-
       {%- set out = [] -%}{%- for v in intent.vlans -%}
-      {%-   set _ = out.append({'vlan_id': v, 'name': vlan_name[v] | default('VLAN' ~ v)}) -%}
+      {%-   set _ = out.append({'vlan_id': v, 'name': vlan_name[v] | default('VLAN' ~ v), 'state': 'active'}) -%}
       {%- endfor -%}{{ out }}
   when: intent.vlans | length > 0
   register: r_vlans
