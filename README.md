@@ -200,3 +200,63 @@ Notes for customer conversations:
   hence the pull-from-SQS design.
 - `bootstrap/aap_bootstrap.py` never replaces a running activation unless run
   with `--recreate-activations` (needed after editing a rulebook).
+
+## The fabric (NetBox is the source of truth for all of it)
+
+```
+            eos-spine1 (AS 65000)         ios-spine2 (AS 65000)
+              Et1     Et2                   Gi2     Gi3
+               |  \  /                       |  \  /
+               |   \/  eBGP over /31s        |   \/
+               |   /\                        |   /\
+              Et1  Et2                      Gi2  Gi3
+            eos-leaf1 (AS 65101)          ios-leaf2 (AS 65102)
+            Vlan10 WEB  172.16.10.1/24    Gi4.30 DB      172.16.30.1/24
+            Vlan20 APP  172.16.20.1/24    Gi4.40 BACKUP  172.16.40.1/24
+              Et3 (access 10)               Gi4 (802.1Q trunk)
+               |                             |
+            host1 172.16.10.10            host2 172.16.30.10 (eth1.30)
+```
+
+| Config | Lives in NetBox as | Change it → |
+|---|---|---|
+| BGP ASN | device custom field **BGP ASN** | device + its BGP neighbors reconfigured |
+| BGP neighbors | **derived** from cables + the peer interface's /31 | (edit cables / IPs) |
+| Advertised networks | loopback + every non-point-to-point interface IP | |
+| VLANs | IPAM → VLANs, interface mode / untagged / tagged VLAN | all devices |
+| Gateways | `Vlan<vid>` SVIs (EOS), `<port>.<vid>` subinterfaces (IOS) | that device |
+| NTP, DNS, syslog, SNMP, banner | config context **NetLab - Global services** | all devices |
+| ACLs | config context **NetLab - Security policy** | all devices |
+| ACL bindings | interface tag `acl-servers-in` (bound per `acl_bindings`) | that device |
+
+`06_configure_devices.yml` renders this intent per device and enforces it with
+`arista.eos` / `cisco.ios` resource modules (`state: replaced`), so it's
+idempotent: a second run reports "Already matched NetBox".
+
+cEOS-lab can't bind ACLs to interfaces (no data-plane ACLs, the command is
+rejected as unsupported), so EOS bindings are only pushed with
+`eos_acl_bindings=true` (real Arista / vEOS). The ACLs themselves are configured
+on all devices; bindings are enforced on the Cisco c8000v leaves.
+
+## Demo scripts
+
+**Config drift**
+1. Change something by hand, e.g. `ssh eos-spine1` → `conf` → `interface Ethernet1` → `description oops`
+2. Run **NetLab - Check Config Drift** (check + diff mode, changes nothing) →
+   `eos-spine1: DRIFT in: interfaces` with the exact command that would fix it
+3. Run **NetLab - Configure Devices** → only that drift is corrected
+
+**NetBox drives the network (EDA)**
+- Edit a VLAN gateway description, shut an interface, or change an IP on a
+  device → one job for that device **and its BGP neighbors** (the job output
+  shows "Change on ios-leaf2 -> ios-leaf2, eos-spine1, ios-spine2")
+- Edit the config context (add/remove an NTP server, change the banner) →
+  one job for all devices; removals are removed from the devices too
+- Tag another interface `acl-servers-in` → ACL bound on it (Cisco)
+
+**Traffic across the fabric**
+`ssh netlab` → `sudo docker exec clab-netlab-host1 ping 172.16.30.10`
+(Arista VLAN 10 → spines, ECMP → Cisco VLAN 30)
+
+**Onboarding a device**: rebuild the lab (or a device) with no config, then run
+**NetLab - Configure Devices**: everything above is rendered from NetBox.
