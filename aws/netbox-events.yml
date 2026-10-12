@@ -121,12 +121,12 @@ Resources:
     Type: AWS::Events::Rule
     Properties:
       Name: !Sub ${Name}-intent-to-eda
-      Description: Device, interface and IP changes -> EDA queue (NetBox body only)
+      Description: Device, interface, IP, VLAN and policy changes -> EDA queue (NetBox body only)
       EventBusName: !Ref Bus
       EventPattern:
         source: [netbox]
         detail:
-          model: [device, interface, ipaddress]
+          model: [device, interface, ipaddress, vlan, configcontext]
       Targets:
         - Id: eda-queue
           Arn: !GetAtt EdaQueue.Arn

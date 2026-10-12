@@ -34,20 +34,13 @@
                if changed_device in groups['all'] else []))
              | select('in', groups['all']) | unique | list }}
 
-    - name: Target these devices
-      ansible.builtin.add_host:
-        name: "{{ item }}"
-        groups: nb_targets
-      loop: "{{ nb_targets }}"
-      changed_when: false
-
     - name: Show scope
       ansible.builtin.debug:
         msg: "{{ ('Change on ' ~ changed_device ~ ' -> ') if changed_device else 'Full run -> ' }}{{ nb_targets | join(', ') or 'nothing in inventory' }}"
 
 
 - name: NetLab — push NetBox intent to devices
-  hosts: "{{ 'nb_targets' if groups.get('nb_targets') else 'all' }}"
+  hosts: all
   gather_facts: false
 
   # Derived from the NetBox platform here rather than via inventory 'compose',
@@ -60,6 +53,12 @@
     ansible_become_method: ansible.netcommon.enable
 
   tasks:
+
+    # The play's host pattern is fixed before play 1 runs, so scope here. If a
+    # --limit skipped play 1, nb_targets is unset and every limited host runs.
+    - name: Skip devices outside the blast radius
+      ansible.builtin.meta: end_host
+      when: inventory_hostname not in (hostvars['localhost'].nb_targets | default(ansible_play_hosts_all))
 
     # ------------------------------------------------------- NetBox data
     # A url lookup runs on the controller, so this works even when a --limit
