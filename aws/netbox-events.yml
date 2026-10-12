@@ -126,7 +126,7 @@ Resources:
       EventPattern:
         source: [netbox]
         detail:
-          model: [device, interface, ipaddress, vlan, configcontext]
+          model: [device, interface, ipaddress, vlan, asn, bgpsession, configcontext]
       Targets:
         - Id: eda-queue
           Arn: !GetAtt EdaQueue.Arn

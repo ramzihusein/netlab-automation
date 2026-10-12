@@ -1,0 +1,12 @@
+{# EOS ports are switched by default (and running-config doesn't say so),
+   so only routed Ethernet ports - no 802.1Q mode in NetBox - set a mode #}
+{% for intf in interfaces if not intf.mgmt_only %}
+- name: {{ intf.name }}
+  enabled: {{ intf.enabled }}
+{% if intf.description %}
+  description: {{ intf.description | to_json }}
+{% endif %}
+{% if intf.name.startswith('Ethernet') and not intf.mode %}
+  mode: layer3
+{% endif %}
+{% endfor %}

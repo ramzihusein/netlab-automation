@@ -1,0 +1,13 @@
+---
+# Job Template: NetLab - Configure Base Services
+# One feature of configure_network.yml: hostname, DNS, SNMP, LLDP, NTP, syslog, banner.
+
+- name: Configure base services from NetBox
+  hosts: all
+  gather_facts: false
+
+  roles:
+    - netbox_scope
+    - base_services
+    - save_config
+    - report

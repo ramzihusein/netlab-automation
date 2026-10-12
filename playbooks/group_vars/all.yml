@@ -1,0 +1,5 @@
+---
+# This device's NetBox config context (services, ACLs, routing settings),
+# merged by NetBox from every context assigned to the device.
+# The NetBox inventory plugin delivers it as a one-item list.
+netbox_policy: "{{ (config_context | default([{}]) | first) if config_context is not mapping else config_context }}"

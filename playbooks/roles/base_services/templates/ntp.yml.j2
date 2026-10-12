@@ -1,0 +1,5 @@
+{# Same shape for eos_ntp_global and ios_ntp_global #}
+servers:
+{% for server in netbox_policy.ntp_servers | default([]) %}
+  - server: {{ server }}
+{% endfor %}

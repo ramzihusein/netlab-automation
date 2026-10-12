@@ -58,10 +58,21 @@
             extra_vars:
               changed_device: "{{ event.body.data.assigned_object.device.name }}"
 
-    # Policy (config contexts) and VLANs apply to many devices: configure all.
-    - name: Policy or VLAN changed
+    - name: BGP session changed
       condition: >-
-        event.body.model in ["configcontext", "vlan"]
+        event.body.model == "bgpsession"
+      action:
+        run_job_template:
+          name: NetLab - Configure Devices
+          organization: Default
+          job_args:
+            extra_vars:
+              changed_device: "{{ event.body.data.device.name }}"
+
+    # Policy (config contexts), VLANs and ASNs apply to many devices: configure all.
+    - name: Policy, VLAN or ASN changed
+      condition: >-
+        event.body.model in ["configcontext", "vlan", "asn"]
       action:
         run_job_template:
           name: NetLab - Configure Devices

@@ -1,0 +1,33 @@
+{# EOS shows well-known ports by name in running-config ("eq ssh"), so use the names #}
+{% set port_names = {'21': 'ftp', '22': 'ssh', '23': 'telnet', '25': 'smtp', '53': 'domain', '80': 'www',
+                     '123': 'ntp', '161': 'snmp', '179': 'bgp', '443': 'https', '514': 'syslog'} %}
+- afi: ipv4
+  acls:
+{% for acl in netbox_policy.acls %}
+    - name: {{ acl.name }}
+      aces:
+{% for entry in acl.entries %}
+        - sequence: {{ entry.seq }}
+          grant: {{ entry.action }}
+          protocol: {{ entry.protocol }}
+          source:
+{% if entry.src == 'any' %}
+            any: true
+{% else %}
+            subnet_address: {{ entry.src }}
+{% endif %}
+          destination:
+{% if entry.dst == 'any' %}
+            any: true
+{% else %}
+            subnet_address: {{ entry.dst }}
+{% endif %}
+{% if entry.dst_port is defined %}
+            port_protocol:
+              eq: "{{ port_names[entry.dst_port | string] | default(entry.dst_port) }}"
+{% endif %}
+{% if entry.log | default(false) %}
+          log: true
+{% endif %}
+{% endfor %}
+{% endfor %}

@@ -1,0 +1,22 @@
+---
+# Job Templates: NetLab - Configure Devices   (job type: run)
+#                NetLab - Check Config Drift  (same playbook, check + diff mode)
+#
+# Makes every network device match NetBox. Each role is one feature for both
+# vendors (Arista EOS, Cisco IOS-XE); configure_<feature>.yml runs just one.
+# EDA passes changed_device=<name>, and only that device and the devices
+# cabled to it are configured.
+
+- name: Make the network match NetBox
+  hosts: all
+  gather_facts: false
+
+  roles:
+    - netbox_scope      # which devices does this change affect?
+    - base_services     # hostname, DNS, SNMP, LLDP, NTP, syslog, banner
+    - vlans             # VLANs on switch ports and VLAN interfaces
+    - interfaces        # descriptions, state, switchports, subinterfaces, IPs
+    - acls              # access lists, applied by interface tag
+    - bgp               # sessions from the NetBox BGP plugin
+    - save_config
+    - report

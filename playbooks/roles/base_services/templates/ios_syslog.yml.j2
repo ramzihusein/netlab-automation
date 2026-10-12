@@ -1,0 +1,4 @@
+hosts:
+{% for server in netbox_policy.syslog_hosts | default([]) %}
+  - hostname: {{ server }}
+{% endfor %}

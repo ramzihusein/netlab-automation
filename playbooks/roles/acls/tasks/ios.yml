@@ -1,0 +1,16 @@
+---
+- name: Access lists (Cisco)
+  cisco.ios.ios_acls:
+    config: "{{ lookup('ansible.builtin.template', 'ios_acls.yml.j2') | from_yaml }}"
+    state: replaced
+  when: netbox_policy.acls is defined
+  register: r_acls
+
+- name: Apply access lists to tagged interfaces (Cisco)
+  cisco.ios.ios_acl_interfaces:
+    config: "{{ acl_bindings if acl_bindings else omit }}"
+    # overridden needs at least one binding; with none in NetBox, remove them all
+    state: "{{ 'overridden' if acl_bindings else 'deleted' }}"
+  vars:
+    acl_bindings: "{{ lookup('ansible.builtin.template', 'acl_bindings.yml.j2') | from_yaml or [] }}"
+  register: r_acl_bindings

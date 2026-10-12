@@ -1,0 +1,13 @@
+---
+# Job Template: NetLab - Configure Interfaces
+# One feature of configure_network.yml: descriptions, state, switchports, subinterfaces, IPs.
+
+- name: Configure interfaces from NetBox
+  hosts: all
+  gather_facts: false
+
+  roles:
+    - netbox_scope
+    - interfaces
+    - save_config
+    - report

@@ -1,0 +1,11 @@
+---
+# Interface descriptions and admin state, switched vs routed ports, VLAN
+# subinterfaces and IPv4 addresses, from the device's interfaces in NetBox.
+
+- name: Configure interfaces on Arista
+  ansible.builtin.include_tasks: eos.yml
+  when: ansible_network_os == 'arista.eos.eos'
+
+- name: Configure interfaces on Cisco
+  ansible.builtin.include_tasks: ios.yml
+  when: ansible_network_os == 'cisco.ios.ios'

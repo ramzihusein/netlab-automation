@@ -1,0 +1,11 @@
+---
+# Hostname, DNS, SNMP, LLDP, NTP, syslog and login banner.
+# Values come from the NetBox config context "NetLab - Global services".
+
+- name: Configure base services on Arista
+  ansible.builtin.include_tasks: eos.yml
+  when: ansible_network_os == 'arista.eos.eos'
+
+- name: Configure base services on Cisco
+  ansible.builtin.include_tasks: ios.yml
+  when: ansible_network_os == 'cisco.ios.ios'

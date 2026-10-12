@@ -1,0 +1,6 @@
+---
+- name: BGP process, neighbors and advertised networks (Arista)
+  arista.eos.eos_bgp_global:
+    config: "{{ lookup('ansible.builtin.template', 'eos_bgp.yml.j2') | from_yaml }}"
+    state: replaced
+  register: r_bgp

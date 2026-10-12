@@ -1,0 +1,12 @@
+{# Every routed interface with its IPv4 addresses (same shape for EOS and IOS).
+   Routed = no 802.1Q mode in NetBox, or a VLAN interface / subinterface. #}
+{% for intf in interfaces if not intf.mgmt_only %}
+{% if not intf.mode or intf.name.startswith('Vlan') or '.' in intf.name %}
+{% set ipv4 = intf.ip_addresses | selectattr('family.value', 'equalto', 4) | list %}
+- name: {{ intf.name }}
+  ipv4:{{ ' []' if not ipv4 else '' }}
+{% for ip in ipv4 %}
+    - address: {{ ip.address }}
+{% endfor %}
+{% endif %}
+{% endfor %}

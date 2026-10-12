@@ -1,0 +1,25 @@
+---
+- name: Hostname, LLDP, DNS and SNMP (Cisco)
+  cisco.ios.ios_config:
+    lines: "{{ lookup('ansible.builtin.template', 'ios_global.yml.j2') | from_yaml }}"
+  register: r_global_settings
+
+- name: NTP servers (Cisco)
+  cisco.ios.ios_ntp_global:
+    config: "{{ lookup('ansible.builtin.template', 'ntp.yml.j2') | from_yaml }}"
+    state: replaced
+  register: r_ntp
+
+- name: Syslog servers (Cisco)
+  cisco.ios.ios_logging_global:
+    config: "{{ lookup('ansible.builtin.template', 'ios_syslog.yml.j2') | from_yaml }}"
+    state: replaced
+  register: r_syslog
+
+- name: Login banner (Cisco)
+  cisco.ios.ios_banner:
+    banner: login
+    text: "{{ netbox_policy.banner }}"
+    state: present
+  when: netbox_policy.banner is defined
+  register: r_banner

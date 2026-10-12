@@ -1,0 +1,4 @@
+---
+# Cisco devices from the NetBox inventory (NetBox platform "ios")
+ansible_connection: ansible.netcommon.network_cli
+ansible_network_os: cisco.ios.ios

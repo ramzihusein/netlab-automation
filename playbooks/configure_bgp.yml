@@ -1,0 +1,13 @@
+---
+# Job Template: NetLab - Configure BGP
+# One feature of configure_network.yml: sessions from the NetBox BGP plugin.
+
+- name: Configure BGP from NetBox
+  hosts: all
+  gather_facts: false
+
+  roles:
+    - netbox_scope
+    - bgp
+    - save_config
+    - report

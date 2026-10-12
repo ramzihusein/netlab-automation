@@ -1,0 +1,21 @@
+{% set loopback = interfaces | selectattr('name', 'equalto', 'Loopback0') | first %}
+as_number: "{{ bgp_sessions[0].local_as.asn }}"
+router_id: {{ loopback.ip_addresses[0].address | ansible.utils.ipaddr('address') }}
+maximum_paths:
+  max_equal_cost_paths: {{ netbox_policy.bgp.maximum_paths | default(4) }}
+neighbor:
+{% for session in bgp_sessions %}
+  - peer: {{ session.remote_address.address | ansible.utils.ipaddr('address') }}
+    remote_as: "{{ session.remote_as.asn }}"
+    description: {{ session.description }}
+{% if session.status.value != 'active' %}
+    shutdown: true
+{% endif %}
+{% endfor %}
+{% set advertised = interfaces | selectattr('tags', 'contains', 'bgp-advertise') | list %}
+network:{{ ' []' if not advertised else '' }}
+{% for intf in advertised %}
+{% for ip in intf.ip_addresses if ip.family.value == 4 %}
+  - address: {{ ip.address | ansible.utils.ipaddr('network/prefix') }}
+{% endfor %}
+{% endfor %}

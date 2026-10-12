@@ -1,0 +1,13 @@
+---
+# Job Template: NetLab - Configure ACLs
+# One feature of configure_network.yml: access lists, applied by interface tag.
+
+- name: Configure access lists from NetBox
+  hosts: all
+  gather_facts: false
+
+  roles:
+    - netbox_scope
+    - acls
+    - save_config
+    - report

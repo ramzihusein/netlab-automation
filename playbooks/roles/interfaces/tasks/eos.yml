@@ -1,0 +1,21 @@
+---
+- name: Descriptions, state and routed/switched mode (Arista)
+  arista.eos.eos_interfaces:
+    config: "{{ lookup('ansible.builtin.template', 'eos_interfaces.yml.j2') | from_yaml }}"
+    state: replaced
+  register: r_interfaces
+
+- name: Access and trunk ports (Arista)
+  arista.eos.eos_l2_interfaces:
+    config: "{{ switchports }}"
+    state: replaced
+  vars:
+    switchports: "{{ lookup('ansible.builtin.template', 'eos_switchports.yml.j2') | from_yaml or [] }}"
+  when: switchports | length > 0
+  register: r_switchports
+
+- name: IPv4 addresses (Arista)
+  arista.eos.eos_l3_interfaces:
+    config: "{{ lookup('ansible.builtin.template', 'ip_addresses.yml.j2') | from_yaml }}"
+    state: replaced
+  register: r_ip_addresses

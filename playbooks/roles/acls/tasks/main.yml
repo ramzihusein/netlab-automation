@@ -1,0 +1,12 @@
+---
+# Access lists from the NetBox config context "NetLab - Security policy",
+# applied to every interface carrying the tag named in its acl_bindings
+# (e.g. tag an interface "acl-servers-in" in NetBox -> SERVERS-IN inbound).
+
+- name: Configure access lists on Arista
+  ansible.builtin.include_tasks: eos.yml
+  when: ansible_network_os == 'arista.eos.eos'
+
+- name: Configure access lists on Cisco
+  ansible.builtin.include_tasks: ios.yml
+  when: ansible_network_os == 'cisco.ios.ios'

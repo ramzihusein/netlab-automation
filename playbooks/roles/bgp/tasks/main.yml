@@ -1,0 +1,26 @@
+---
+# BGP from the NetBox BGP plugin (Plugins -> BGP -> Sessions): one session per
+# neighbor, with local/remote address and AS. Interfaces tagged bgp-advertise
+# are advertised; the router ID is the Loopback0 address. A session set to
+# Offline (or Failed) in NetBox is shut down on the device; Planned sessions
+# are left out until they go Active.
+
+- name: Read this device's BGP sessions from NetBox
+  ansible.builtin.set_fact:
+    bgp_sessions: >-
+      {{ (lookup('ansible.builtin.url', netbox_url ~ '/api/plugins/bgp/session/?limit=100&device=' ~ inventory_hostname,
+                 validate_certs=false, split_lines=false,
+                 headers={'Authorization': 'Token ' ~ netbox_token, 'Accept': 'application/json'})
+          | from_json).results | rejectattr('status.value', 'equalto', 'planned') | list }}
+
+- name: Configure BGP on Arista
+  ansible.builtin.include_tasks: eos.yml
+  when:
+    - ansible_network_os == 'arista.eos.eos'
+    - bgp_sessions | length > 0
+
+- name: Configure BGP on Cisco
+  ansible.builtin.include_tasks: ios.yml
+  when:
+    - ansible_network_os == 'cisco.ios.ios'
+    - bgp_sessions | length > 0

@@ -1,0 +1,16 @@
+{% set loopback = interfaces | selectattr('name', 'equalto', 'Loopback0') | first %}
+as_number: "{{ bgp_sessions[0].local_as.asn }}"
+bgp:
+  router_id:
+    address: {{ loopback.ip_addresses[0].address | ansible.utils.ipaddr('address') }}
+  log_neighbor_changes: true
+neighbors:
+{% for session in bgp_sessions %}
+  - neighbor_address: {{ session.remote_address.address | ansible.utils.ipaddr('address') }}
+    remote_as: "{{ session.remote_as.asn }}"
+    description: {{ session.description }}
+{% if session.status.value != 'active' %}
+    shutdown:
+      set: true
+{% endif %}
+{% endfor %}

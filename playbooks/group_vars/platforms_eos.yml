@@ -1,0 +1,7 @@
+---
+# Arista devices from the NetBox inventory (NetBox platform "eos")
+ansible_connection: ansible.netcommon.network_cli
+ansible_network_os: arista.eos.eos
+# EOS needs "enable" before configuration mode (cEOS has no enable secret)
+ansible_become: true
+ansible_become_method: ansible.netcommon.enable

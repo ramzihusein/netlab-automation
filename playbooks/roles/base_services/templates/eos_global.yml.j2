@@ -1,0 +1,12 @@
+{# Global settings, written the way EOS shows them in running-config #}
+- hostname {{ inventory_hostname }}
+- ip routing
+{% if netbox_policy.domain_name is defined %}
+- dns domain {{ netbox_policy.domain_name }}
+{% endif %}
+{% for server in netbox_policy.name_servers | default([]) %}
+- ip name-server vrf default {{ server }}
+{% endfor %}
+{% if netbox_policy.snmp_ro_community is defined %}
+- snmp-server community {{ netbox_policy.snmp_ro_community }} ro
+{% endif %}

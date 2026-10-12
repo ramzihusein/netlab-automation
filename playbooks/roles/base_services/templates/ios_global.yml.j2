@@ -1,0 +1,12 @@
+{# Global settings, written the way IOS-XE shows them in running-config #}
+- hostname {{ inventory_hostname }}
+- lldp run
+{% if netbox_policy.domain_name is defined %}
+- ip domain name {{ netbox_policy.domain_name }}
+{% endif %}
+{% for server in netbox_policy.name_servers | default([]) %}
+- ip name-server {{ server }}
+{% endfor %}
+{% if netbox_policy.snmp_ro_community is defined %}
+- snmp-server community {{ netbox_policy.snmp_ro_community }} RO
+{% endif %}

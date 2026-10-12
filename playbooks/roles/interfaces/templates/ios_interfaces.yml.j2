@@ -1,0 +1,7 @@
+{% for intf in interfaces if not intf.mgmt_only %}
+- name: {{ intf.name }}
+  enabled: {{ intf.enabled }}
+{% if intf.description %}
+  description: {{ intf.description | to_json }}
+{% endif %}
+{% endfor %}

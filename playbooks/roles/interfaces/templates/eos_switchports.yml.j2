@@ -1,0 +1,12 @@
+{# Ethernet ports with an 802.1Q mode in NetBox (access is EOS's default mode) #}
+{% for intf in interfaces if intf.mode and intf.name.startswith('Ethernet') %}
+- name: {{ intf.name }}
+{% if intf.mode.value == 'access' %}
+  access:
+    vlan: {{ intf.untagged_vlan.vid }}
+{% else %}
+  mode: trunk
+  trunk:
+    trunk_allowed_vlans: {{ intf.tagged_vlans | map(attribute='vid') | map('string') | list | to_json }}
+{% endif %}
+{% endfor %}

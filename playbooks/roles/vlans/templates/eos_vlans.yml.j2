@@ -1,0 +1,12 @@
+{# VLANs on this switch's access/trunk ports, plus its VLAN interfaces (Vlan<id>) #}
+{% set used = [] %}
+{% for intf in interfaces if not intf.mgmt_only %}
+{% if intf.untagged_vlan %}{% set _ = used.append(intf.untagged_vlan.vid) %}{% endif %}
+{% for vlan in intf.tagged_vlans %}{% set _ = used.append(vlan.vid) %}{% endfor %}
+{% if intf.name.startswith('Vlan') %}{% set _ = used.append(intf.name[4:] | int) %}{% endif %}
+{% endfor %}
+{% for vlan in netbox_vlans if vlan.vid in used %}
+- vlan_id: {{ vlan.vid }}
+  name: {{ vlan.name }}
+  state: active
+{% endfor %}

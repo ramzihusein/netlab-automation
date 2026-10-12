@@ -1,0 +1,27 @@
+---
+# Which devices does this run configure?
+#   changed_device=<name>  (sent by EDA for a device/interface/IP/BGP change)
+#                          -> that device plus the devices cabled to it
+#   not set                -> every device (or the job's limit)
+
+- name: Work out which devices this change affects
+  ansible.builtin.set_fact:
+    netbox_targets: >-
+      {{ ansible_play_hosts_all if not changed
+         else ([changed] + cabled_neighbors) | select('in', ansible_play_hosts_all) | unique | list }}
+  vars:
+    changed: "{{ changed_device | default('') }}"
+    cabled_neighbors: >-
+      {{ hostvars[changed].interfaces | default([]) | map(attribute='link_peers') | flatten
+         | map(attribute='device.name') | list if changed in hostvars else [] }}
+  run_once: true
+
+- name: Show which devices will be configured
+  ansible.builtin.debug:
+    msg: >-
+      {{ ('NetBox change on ' ~ changed_device ~ ' -> ') if changed_device | default('') else 'All devices -> ' }}{{ netbox_targets | join(', ') }}
+  run_once: true
+
+- name: Skip devices this change doesn't affect
+  ansible.builtin.meta: end_host
+  when: inventory_hostname not in netbox_targets

@@ -1,0 +1,26 @@
+---
+# VLANs used by a switch's access/trunk ports and VLAN interfaces, named as in
+# NetBox (IPAM -> VLANs). Arista only: the Cisco leaves are routers and carry
+# VLANs on 802.1Q subinterfaces instead (see the interfaces role).
+
+- name: Read VLAN names from NetBox
+  ansible.builtin.set_fact:
+    netbox_vlans: >-
+      {{ (lookup('ansible.builtin.url', netbox_url ~ '/api/ipam/vlans/?limit=1000', validate_certs=false,
+                 headers={'Authorization': 'Token ' ~ netbox_token, 'Accept': 'application/json'},
+                 split_lines=false) | from_json).results }}
+  run_once: true
+
+- name: Work out which VLANs this switch needs
+  ansible.builtin.set_fact:
+    switch_vlans: "{{ lookup('ansible.builtin.template', 'eos_vlans.yml.j2') | from_yaml or [] }}"
+  when: ansible_network_os == 'arista.eos.eos'
+
+- name: VLANs (Arista)
+  arista.eos.eos_vlans:
+    config: "{{ switch_vlans }}"
+    state: replaced
+  when:
+    - ansible_network_os == 'arista.eos.eos'
+    - switch_vlans | length > 0
+  register: r_vlans

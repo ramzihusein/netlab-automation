@@ -1,0 +1,13 @@
+---
+# Job Template: NetLab - Configure VLANs
+# One feature of configure_network.yml: VLANs on switch ports and VLAN interfaces.
+
+- name: Configure VLANs from NetBox
+  hosts: all
+  gather_facts: false
+
+  roles:
+    - netbox_scope
+    - vlans
+    - save_config
+    - report

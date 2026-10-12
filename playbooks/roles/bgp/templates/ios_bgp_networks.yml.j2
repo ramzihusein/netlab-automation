@@ -1,0 +1,18 @@
+as_number: "{{ bgp_sessions[0].local_as.asn }}"
+address_family:
+  - afi: ipv4
+    maximum_paths:
+      paths: {{ netbox_policy.bgp.maximum_paths | default(4) }}
+{% set advertised = interfaces | selectattr('tags', 'contains', 'bgp-advertise') | list %}
+    networks:{{ ' []' if not advertised else '' }}
+{% for intf in advertised %}
+{% for ip in intf.ip_addresses if ip.family.value == 4 %}
+      - address: {{ ip.address | ansible.utils.ipaddr('network') }}
+        mask: {{ ip.address | ansible.utils.ipaddr('netmask') }}
+{% endfor %}
+{% endfor %}
+    neighbors:
+{% for session in bgp_sessions %}
+      - neighbor_address: {{ session.remote_address.address | ansible.utils.ipaddr('address') }}
+        activate: true
+{% endfor %}

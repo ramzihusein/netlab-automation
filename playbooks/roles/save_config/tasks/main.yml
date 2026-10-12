@@ -1,0 +1,14 @@
+---
+# Write running-config to startup-config (skipped in check mode).
+
+- name: Save configuration (Arista)
+  arista.eos.eos_command:
+    commands: write memory
+  when: ansible_network_os == 'arista.eos.eos'
+  changed_when: false
+
+- name: Save configuration (Cisco)
+  cisco.ios.ios_command:
+    commands: write memory
+  when: ansible_network_os == 'cisco.ios.ios'
+  changed_when: false

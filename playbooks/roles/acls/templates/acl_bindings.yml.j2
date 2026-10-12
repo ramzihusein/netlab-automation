@@ -1,0 +1,11 @@
+{# Interfaces tagged in NetBox with a tag listed in acl_bindings (same shape for EOS and IOS) #}
+{% for binding in netbox_policy.acl_bindings | default([]) %}
+{% for intf in interfaces if binding.tag in intf.tags %}
+- name: {{ intf.name }}
+  access_groups:
+    - afi: ipv4
+      acls:
+        - name: {{ binding.acl }}
+          direction: {{ binding.direction }}
+{% endfor %}
+{% endfor %}

@@ -1,0 +1,20 @@
+---
+- name: Access lists (Arista)
+  arista.eos.eos_acls:
+    config: "{{ lookup('ansible.builtin.template', 'eos_acls.yml.j2') | from_yaml }}"
+    state: replaced
+  when: netbox_policy.acls is defined
+  register: r_acls
+
+# cEOS-lab can't apply ACLs to interfaces ("not supported on this hardware
+# platform"), so this only runs with eos_acl_bindings=true (real Arista / vEOS).
+- name: Apply access lists to tagged interfaces (Arista)
+  arista.eos.eos_acl_interfaces:
+    config: "{{ acl_bindings }}"
+    state: overridden
+  vars:
+    acl_bindings: "{{ lookup('ansible.builtin.template', 'acl_bindings.yml.j2') | from_yaml or [] }}"
+  when:
+    - eos_acl_bindings | default(false) | bool
+    - acl_bindings | length > 0
+  register: r_acl_bindings

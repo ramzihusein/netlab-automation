@@ -1,0 +1,12 @@
+---
+- name: BGP process and neighbors (Cisco)
+  cisco.ios.ios_bgp_global:
+    config: "{{ lookup('ansible.builtin.template', 'ios_bgp.yml.j2') | from_yaml }}"
+    state: replaced
+  register: r_bgp
+
+- name: BGP advertised networks and ECMP (Cisco)
+  cisco.ios.ios_bgp_address_family:
+    config: "{{ lookup('ansible.builtin.template', 'ios_bgp_networks.yml.j2') | from_yaml }}"
+    state: replaced
+  register: r_bgp_networks

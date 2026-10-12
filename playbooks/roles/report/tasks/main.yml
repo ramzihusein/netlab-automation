@@ -1,0 +1,16 @@
+---
+# One line per device: what changed, or in check mode what has drifted from
+# NetBox. Every role registers its results as r_<area>.
+
+- name: Report changes (or drift, in check mode) against NetBox
+  ansible.builtin.debug:
+    msg: >-
+      {{ ('Drift from NetBox in: ' if ansible_check_mode else 'Changed: ') ~ changed_areas | join(', ')
+         if changed_areas
+         else ('In sync with NetBox' if ansible_check_mode else 'Already matched NetBox') }}
+  vars:
+    changed_areas: >-
+      {%- set out = [] -%}
+      {%- for name in query('ansible.builtin.varnames', '^r_') -%}
+      {%-   if lookup('ansible.builtin.vars', name) is changed -%}{%- set _ = out.append(name[2:]) -%}{%- endif -%}
+      {%- endfor -%}{{ out }}

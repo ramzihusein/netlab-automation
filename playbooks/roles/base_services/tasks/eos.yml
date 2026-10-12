@@ -1,0 +1,25 @@
+---
+- name: Hostname, routing, DNS and SNMP (Arista)
+  arista.eos.eos_config:
+    lines: "{{ lookup('ansible.builtin.template', 'eos_global.yml.j2') | from_yaml }}"
+  register: r_global_settings
+
+- name: NTP servers (Arista)
+  arista.eos.eos_ntp_global:
+    config: "{{ lookup('ansible.builtin.template', 'ntp.yml.j2') | from_yaml }}"
+    state: replaced
+  register: r_ntp
+
+- name: Syslog servers (Arista)
+  arista.eos.eos_logging_global:
+    config: "{{ lookup('ansible.builtin.template', 'eos_syslog.yml.j2') | from_yaml }}"
+    state: replaced
+  register: r_syslog
+
+- name: Login banner (Arista)
+  arista.eos.eos_banner:
+    banner: login
+    text: "{{ netbox_policy.banner }}"
+    state: present
+  when: netbox_policy.banner is defined
+  register: r_banner
