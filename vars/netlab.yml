@@ -69,24 +69,84 @@ lab_nodes:
     role: spine
     mgmt_ip: 172.20.20.11
     loopback: 192.168.255.1/32
+    asn: 65000
   - name: ios-spine2
     os: ios
     role: spine
     mgmt_ip: 172.20.20.12
     loopback: 192.168.255.2/32
+    asn: 65000
   - name: eos-leaf1
     os: eos
     role: leaf
     mgmt_ip: 172.20.20.21
     loopback: 192.168.255.11/32
+    asn: 65101
   - name: ios-leaf2
     os: ios
     role: leaf
     mgmt_ip: 172.20.20.22
     loopback: 192.168.255.12/32
+    asn: 65102
 
 lab_links:
   - {a: eos-spine1, a_port: 1, a_ip: 192.168.254.0/31, b: eos-leaf1, b_port: 1, b_ip: 192.168.254.1/31}
   - {a: eos-spine1, a_port: 2, a_ip: 192.168.254.2/31, b: ios-leaf2, b_port: 1, b_ip: 192.168.254.3/31}
   - {a: ios-spine2, a_port: 1, a_ip: 192.168.254.4/31, b: eos-leaf1, b_port: 2, b_ip: 192.168.254.5/31}
   - {a: ios-spine2, a_port: 2, a_ip: 192.168.254.6/31, b: ios-leaf2, b_port: 2, b_ip: 192.168.254.7/31}
+
+# ---------------------------------------------------------------------------
+# Server VLANs, routed at the leaf they live on (L3 leaf / eBGP fabric, no
+# stretched L2). Gateways are SVIs (Vlan<vid>) on EOS leaves and 802.1Q
+# subinterfaces of the host port (<port>.<vid>) on IOS leaves.
+# ---------------------------------------------------------------------------
+lab_vlans:
+  - {vid: 10, name: WEB, leaf: eos-leaf1, gateway: 172.16.10.1/24}
+  - {vid: 20, name: APP, leaf: eos-leaf1, gateway: 172.16.20.1/24}
+  - {vid: 30, name: DB, leaf: ios-leaf2, gateway: 172.16.30.1/24}
+  - {vid: 40, name: BACKUP, leaf: ios-leaf2, gateway: 172.16.40.1/24}
+
+# Linux test hosts (containerlab "linux" nodes), one per leaf, so traffic can
+# cross the fabric between vendors. Tagged when the leaf uses subinterfaces.
+lab_host_image: ghcr.io/hellt/network-multitool:latest
+lab_hosts:
+  - {name: host1, leaf: eos-leaf1, leaf_port: 3, vid: 10, ip: 172.16.10.10/24, mgmt_ip: 172.20.20.101}
+  - {name: host2, leaf: ios-leaf2, leaf_port: 3, vid: 30, ip: 172.16.30.10/24, mgmt_ip: 172.20.20.102}
+
+# ---------------------------------------------------------------------------
+# Policy, seeded into NetBox config contexts (assigned by tag "netlab").
+# Edit these in NetBox (Provisioning -> Config Contexts); EDA pushes them to
+# every device. ACLs are bound to interfaces by NetBox interface tags.
+# ---------------------------------------------------------------------------
+lab_config_contexts:
+  - name: NetLab - Global services
+    weight: 1000
+    description: NTP, DNS, syslog, SNMP and login banner for every NetLab device
+    data:
+      ntp_servers: [169.254.169.123, 192.0.2.123]
+      name_servers: [10.0.0.2]
+      domain_name: netlab.ramzidev.com
+      syslog_hosts: [192.0.2.50]
+      snmp_ro_community: netlab-ro
+      banner: >-
+        Authorized access only. This device is managed by Red Hat Ansible
+        Automation Platform from NetBox; manual changes will be overwritten.
+  - name: NetLab - Security policy
+    weight: 1000
+    description: ACLs, and which NetBox interface tag binds each one
+    data:
+      acls:
+        - name: SERVERS-IN
+          entries:
+            - {seq: 10, action: permit, protocol: icmp, src: any, dst: any}
+            - {seq: 20, action: permit, protocol: tcp, src: any, dst: any, dst_port: 22}
+            - {seq: 30, action: permit, protocol: tcp, src: any, dst: any, dst_port: 443}
+            - {seq: 40, action: deny, protocol: tcp, src: any, dst: any, dst_port: 23, log: true}
+            - {seq: 50, action: permit, protocol: ip, src: any, dst: any}
+        - name: MGMT-ALLOWED
+          entries:
+            - {seq: 10, action: permit, protocol: ip, src: 10.0.0.0/16, dst: any}
+            - {seq: 20, action: permit, protocol: ip, src: 172.20.20.0/24, dst: any}
+            - {seq: 30, action: deny, protocol: ip, src: any, dst: any, log: true}
+      acl_bindings:
+        - {tag: acl-servers-in, acl: SERVERS-IN, direction: in}

@@ -28,9 +28,16 @@
   vars:
     _names: "{{ lab_active_nodes | map(attribute='name') | list }}"
 
+- name: Select test hosts whose leaf is active
+  ansible.builtin.set_fact:
+    lab_active_hosts: "{{ lab_hosts | selectattr('leaf', 'in', _names) | list }}"
+  vars:
+    _names: "{{ lab_active_nodes | map(attribute='name') | list }}"
+
 - name: Show active lab
   ansible.builtin.debug:
     msg:
       - "Kinds: eos={{ lab_state.eos_kind }} ios={{ lab_state.ios_kind }}"
       - "Nodes: {{ lab_active_nodes | map(attribute='name') | join(', ') }}"
       - "Links: {{ lab_active_links | length }}"
+      - "Hosts: {{ lab_active_hosts | map(attribute='name') | join(', ') }}"

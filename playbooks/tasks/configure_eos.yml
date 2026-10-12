@@ -1,33 +1,133 @@
 ---
-# Arista EOS (cEOS). Inputs: nb_ifaces, nb_l3 from 06_configure_devices.yml
+# Arista EOS (cEOS). Inputs from 06_configure_devices.yml: cc, intent,
+# vlan_name, my_asn. Each task registers r_<area> for the run/drift summary.
 
-- name: Hostname and routing
+- name: Base settings (hostname, routing, DNS, SNMP)
   arista.eos.eos_config:
-    lines:
-      - "hostname {{ inventory_hostname }}"
-      - ip routing
+    lines: >-
+      {{ ['hostname ' ~ inventory_hostname, 'ip routing']
+         + (['dns domain ' ~ cc.domain_name] if cc.domain_name is defined else [])
+         + (cc.name_servers | default([]) | map('regex_replace', '^', 'ip name-server vrf default ') | list)
+         + (['snmp-server community ' ~ cc.snmp_ro_community ~ ' ro'] if cc.snmp_ro_community is defined else []) }}
+  register: r_base
 
-- name: Build EOS interface config
-  ansible.builtin.set_fact:
-    eos_ifaces: >-
-      {{ eos_ifaces | default([]) + [
-           {'name': item.name, 'enabled': item.enabled}
-           | combine({'description': item.description} if item.description else {})
-           | combine({'mode': 'layer3'} if item.name.startswith('Ethernet') else {})
-         ] }}
-  loop: "{{ nb_ifaces }}"
-  loop_control:
-    label: "{{ item.name }}"
-
-- name: Interface descriptions, state and routed mode
-  arista.eos.eos_interfaces:
-    config: "{{ eos_ifaces }}"
+- name: NTP servers
+  arista.eos.eos_ntp_global:
+    config:
+      servers: >-
+        {{ cc.ntp_servers | default([]) | map('regex_replace', '^', '{"server": "') | map('regex_replace', '$', '"}') | map('from_json') | list }}
     state: replaced
+  register: r_ntp
+
+- name: Syslog hosts
+  arista.eos.eos_logging_global:
+    config:
+      hosts: >-
+        {{ cc.syslog_hosts | default([]) | map('regex_replace', '^', '{"name": "') | map('regex_replace', '$', '"}') | map('from_json') | list }}
+    state: replaced
+  register: r_syslog
+
+- name: Login banner
+  arista.eos.eos_banner:
+    banner: login
+    text: "{{ cc.banner }}"
+    state: present
+  when: cc.banner is defined
+  register: r_banner
+
+- name: VLANs used by this device's ports and SVIs
+  arista.eos.eos_vlans:
+    config: "{{ eos_vlans }}"
+    state: replaced
+  vars:
+    eos_vlans: >-
+      {%- set out = [] -%}{%- for v in intent.vlans -%}
+      {%-   set _ = out.append({'vlan_id': v, 'name': vlan_name[v] | default('VLAN' ~ v)}) -%}
+      {%- endfor -%}{{ out }}
+  when: intent.vlans | length > 0
+  register: r_vlans
+
+- name: Interfaces (description, state, routed or switched)
+  arista.eos.eos_interfaces:
+    config: >-
+      {%- set out = [] -%}{%- for i in intent.ifs -%}
+      {%-   set c = {'name': i.name, 'enabled': i.enabled} -%}
+      {%-   if i.description -%}{%- set _ = c.update({'description': i.description}) -%}{%- endif -%}
+      {%-   if i.name.startswith('Ethernet') -%}{%- set _ = c.update({'mode': 'layer2' if i.l2 else 'layer3'}) -%}{%- endif -%}
+      {%-   set _ = out.append(c) -%}
+      {%- endfor -%}{{ out }}
+    state: replaced
+  register: r_interfaces
+
+- name: Switchports (access / trunk VLANs)
+  arista.eos.eos_l2_interfaces:
+    config: >-
+      {%- set out = [] -%}{%- for p in intent.l2 -%}
+      {%-   if p.mode == 'access' -%}
+      {%-     set _ = out.append({'name': p.name, 'mode': 'access', 'access': {'vlan': p.access_vlan}}) -%}
+      {%-   else -%}
+      {%-     set _ = out.append({'name': p.name, 'mode': 'trunk',
+                                  'trunk': {'trunk_allowed_vlans': p.trunk_vlans | map('string') | list}}) -%}
+      {%-   endif -%}
+      {%- endfor -%}{{ out }}
+    state: replaced
+  when: intent.l2 | length > 0
+  register: r_l2
 
 - name: Interface IPv4 addresses
   arista.eos.eos_l3_interfaces:
-    config: "{{ nb_l3 }}"
+    config: >-
+      {%- set out = [] -%}{%- for i in intent.l3 -%}
+      {%-   set _ = out.append({'name': i.name, 'ipv4': i.ipv4 | map('regex_replace', '^', '{"address": "') | map('regex_replace', '$', '"}') | map('from_json') | list}) -%}
+      {%- endfor -%}{{ out }}
     state: replaced
+  register: r_l3
+
+- name: ACLs
+  arista.eos.eos_acls:
+    config:
+      - afi: ipv4
+        acls: >-
+          {%- set out = [] -%}{%- for a in cc.acls | default([]) -%}
+          {%-   set aces = [] -%}{%- for e in a.entries -%}
+          {%-     set ace = {'sequence': e.seq, 'grant': e.action, 'protocol': e.protocol,
+                             'source': ({'any': true} if e.src == 'any' else {'subnet_address': e.src}),
+                             'destination': ({'any': true} if e.dst == 'any' else {'subnet_address': e.dst})} -%}
+          {%-     if e.dst_port is defined -%}{%- set _ = ace.destination.update({'port_protocol': {'eq': e.dst_port | string}}) -%}{%- endif -%}
+          {%-     if e.log | default(false) -%}{%- set _ = ace.update({'log': true}) -%}{%- endif -%}
+          {%-     set _ = aces.append(ace) -%}
+          {%-   endfor -%}
+          {%-   set _ = out.append({'name': a.name, 'aces': aces}) -%}
+          {%- endfor -%}{{ out }}
+    state: replaced
+  when: cc.acls | default([]) | length > 0
+  register: r_acls
+
+- name: ACL bindings (from NetBox interface tags)
+  arista.eos.eos_acl_interfaces:
+    config: >-
+      {%- set out = [] -%}{%- for b in intent.acl_bindings -%}
+      {%-   set _ = out.append({'name': b.name, 'access_groups': [{'afi': 'ipv4', 'acls': [{'name': b.acl, 'direction': b.direction}]}]}) -%}
+      {%- endfor -%}{{ out }}
+    state: overridden
+  register: r_acl_bind
+
+- name: BGP
+  arista.eos.eos_bgp_global:
+    config:
+      as_number: "{{ my_asn | string }}"
+      router_id: "{{ intent.router_id }}"
+      maximum_paths:
+        max_equal_cost_paths: 4
+      neighbor: >-
+        {%- set out = [] -%}{%- for n in intent.bgp_neighbors -%}
+        {%-   set _ = out.append({'peer': n.ip, 'remote_as': n.asn, 'description': n.description}) -%}
+        {%- endfor -%}{{ out }}
+      network: >-
+        {{ intent.bgp_networks | map('regex_replace', '^', '{"address": "') | map('regex_replace', '$', '"}') | map('from_json') | list }}
+    state: replaced
+  when: my_asn is not none and my_asn | string | length > 0
+  register: r_bgp
 
 - name: Save configuration
   arista.eos.eos_command:

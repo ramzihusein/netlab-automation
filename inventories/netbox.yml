@@ -3,7 +3,7 @@
 # URL and token come from the "NetBox API" credential (NETBOX_API / NETBOX_TOKEN).
 plugin: netbox.netbox.nb_inventory
 validate_certs: false
-config_context: false
+config_context: true
 interfaces: true
 virtual_chassis_name: false
 device_query_filters:

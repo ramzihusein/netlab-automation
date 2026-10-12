@@ -105,9 +105,9 @@
           lookup: {name: NetLab intent change}
           body:
             name: NetLab intent change
-            description: Device, interface and IP changes trigger AAP to reconfigure the device
+            description: Device, interface, IP, VLAN and config context (policy) changes trigger AAP
             enabled: true
-            object_types: [dcim.device, dcim.interface, ipam.ipaddress]
+            object_types: [dcim.device, dcim.interface, ipam.ipaddress, ipam.vlan, extras.configcontext]
             event_types: [object_created, object_updated, object_deleted]
             action_type: webhook
             action_object_type: extras.webhook

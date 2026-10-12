@@ -21,6 +21,8 @@
         delay_seconds: 2
 
   rules:
+    # Device-scoped changes: the playbook configures this device plus its
+    # cabled BGP neighbors (worked out from NetBox), so pass the device name.
     - name: Device created or updated
       condition: >-
         event.body.model == "device"
@@ -30,18 +32,19 @@
           name: NetLab - Configure Devices
           organization: Default
           job_args:
-            limit: "{{ event.body.data.name }}"
+            extra_vars:
+              changed_device: "{{ event.body.data.name }}"
 
     - name: Interface changed
       condition: >-
         event.body.model == "interface"
-        and event.body.event in ["created", "updated"]
       action:
         run_job_template:
           name: NetLab - Configure Devices
           organization: Default
           job_args:
-            limit: "{{ event.body.data.device.name }}"
+            extra_vars:
+              changed_device: "{{ event.body.data.device.name }}"
 
     - name: Interface IP address changed
       condition: >-
@@ -52,4 +55,14 @@
           name: NetLab - Configure Devices
           organization: Default
           job_args:
-            limit: "{{ event.body.data.assigned_object.device.name }}"
+            extra_vars:
+              changed_device: "{{ event.body.data.assigned_object.device.name }}"
+
+    # Policy (config contexts) and VLANs apply to many devices: configure all.
+    - name: Policy or VLAN changed
+      condition: >-
+        event.body.model in ["configcontext", "vlan"]
+      action:
+        run_job_template:
+          name: NetLab - Configure Devices
+          organization: Default

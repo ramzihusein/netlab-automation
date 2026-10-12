@@ -256,6 +256,10 @@
         a_if: "{{ os_kinds[kind_of[item.a]].iface_prefix ~ (item.a_port + os_kinds[kind_of[item.a]].iface_offset) }}"
         b_if: "{{ os_kinds[kind_of[item.b]].iface_prefix ~ (item.b_port + os_kinds[kind_of[item.b]].iface_offset) }}"
 
+    # ------------------------------------------------- fabric design + policy
+    - name: Seed BGP, VLANs, gateways, test hosts and config contexts
+      ansible.builtin.include_tasks: tasks/nb_fabric.yml
+
     - name: Re-enable the event rule
       ansible.builtin.uri:
         url: "{{ netbox_url }}/api/extras/event-rules/{{ nb_event_rule.json.results[0].id }}/"

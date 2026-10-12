@@ -1,31 +1,136 @@
 ---
-# Cisco IOS / IOS-XE (IOL or c8000v). Inputs: nb_ifaces, nb_l3 from 06_configure_devices.yml
+# Cisco IOS / IOS-XE (c8000v or IOL). Inputs from 06_configure_devices.yml:
+# cc, intent, my_asn. Each task registers r_<area> for the run/drift summary.
 
-- name: Hostname
+- name: Base settings (hostname, DNS, SNMP, LLDP)
   cisco.ios.ios_config:
-    lines:
-      - "hostname {{ inventory_hostname }}"
+    lines: >-
+      {{ ['hostname ' ~ inventory_hostname, 'lldp run']
+         + (['ip domain name ' ~ cc.domain_name] if cc.domain_name is defined else [])
+         + (cc.name_servers | default([]) | map('regex_replace', '^', 'ip name-server ') | list)
+         + (['snmp-server community ' ~ cc.snmp_ro_community ~ ' RO'] if cc.snmp_ro_community is defined else []) }}
+  register: r_base
 
-- name: Build IOS interface config
-  ansible.builtin.set_fact:
-    ios_ifaces: >-
-      {{ ios_ifaces | default([]) + [
-           {'name': item.name, 'enabled': item.enabled}
-           | combine({'description': item.description} if item.description else {})
-         ] }}
-  loop: "{{ nb_ifaces }}"
-  loop_control:
-    label: "{{ item.name }}"
-
-- name: Interface descriptions and state
-  cisco.ios.ios_interfaces:
-    config: "{{ ios_ifaces }}"
+- name: NTP servers
+  cisco.ios.ios_ntp_global:
+    config:
+      servers: >-
+        {{ cc.ntp_servers | default([]) | map('regex_replace', '^', '{"server": "') | map('regex_replace', '$', '"}') | map('from_json') | list }}
     state: replaced
+  register: r_ntp
+
+- name: Syslog hosts
+  cisco.ios.ios_logging_global:
+    config:
+      hosts: >-
+        {{ cc.syslog_hosts | default([]) | map('regex_replace', '^', '{"hostname": "') | map('regex_replace', '$', '"}') | map('from_json') | list }}
+    state: replaced
+  register: r_syslog
+
+- name: Login banner
+  cisco.ios.ios_banner:
+    banner: login
+    text: "{{ cc.banner }}"
+    state: present
+  when: cc.banner is defined
+  register: r_banner
+
+- name: Interfaces (description, state; creates subinterfaces)
+  cisco.ios.ios_interfaces:
+    config: >-
+      {%- set out = [] -%}{%- for i in intent.ifs -%}
+      {%-   set c = {'name': i.name, 'enabled': i.enabled} -%}
+      {%-   if i.description -%}{%- set _ = c.update({'description': i.description}) -%}{%- endif -%}
+      {%-   set _ = out.append(c) -%}
+      {%- endfor -%}{{ out }}
+    state: replaced
+  register: r_interfaces
+
+# IOS requires the 802.1Q encapsulation before an IP can go on a subinterface.
+- name: VLAN subinterface encapsulation
+  cisco.ios.ios_config:
+    parents: "interface {{ item.name }}"
+    lines: "encapsulation dot1Q {{ item.vid }}"
+  loop: "{{ intent.subifs }}"
+  loop_control:
+    label: "{{ item.name }} -> VLAN {{ item.vid }}"
+  register: r_subifs
 
 - name: Interface IPv4 addresses
   cisco.ios.ios_l3_interfaces:
-    config: "{{ nb_l3 }}"
+    config: >-
+      {%- set out = [] -%}{%- for i in intent.l3 -%}
+      {%-   set _ = out.append({'name': i.name, 'ipv4': i.ipv4 | map('regex_replace', '^', '{"address": "') | map('regex_replace', '$', '"}') | map('from_json') | list}) -%}
+      {%- endfor -%}{{ out }}
     state: replaced
+  register: r_l3
+
+- name: ACLs
+  cisco.ios.ios_acls:
+    config:
+      - afi: ipv4
+        acls: >-
+          {%- set out = [] -%}{%- for a in cc.acls | default([]) -%}
+          {%-   set aces = [] -%}{%- for e in a.entries -%}
+          {%-     set ace = {'sequence': e.seq, 'grant': e.action, 'protocol': e.protocol,
+                             'source': ({'any': true} if e.src == 'any' else
+                                        {'address': e.src | ansible.utils.ipaddr('network'), 'wildcard_bits': e.src | ansible.utils.ipaddr('hostmask')}),
+                             'destination': ({'any': true} if e.dst == 'any' else
+                                             {'address': e.dst | ansible.utils.ipaddr('network'), 'wildcard_bits': e.dst | ansible.utils.ipaddr('hostmask')})} -%}
+          {%-     if e.dst_port is defined -%}{%- set _ = ace.destination.update({'port_protocol': {'eq': e.dst_port | string}}) -%}{%- endif -%}
+          {%-     if e.log | default(false) -%}{%- set _ = ace.update({'log': {'set': true}}) -%}{%- endif -%}
+          {%-     set _ = aces.append(ace) -%}
+          {%-   endfor -%}
+          {%-   set _ = out.append({'name': a.name, 'acl_type': 'extended', 'aces': aces}) -%}
+          {%- endfor -%}{{ out }}
+    state: replaced
+  when: cc.acls | default([]) | length > 0
+  register: r_acls
+
+- name: ACL bindings (from NetBox interface tags)
+  cisco.ios.ios_acl_interfaces:
+    config: >-
+      {%- set out = [] -%}{%- for b in intent.acl_bindings -%}
+      {%-   set _ = out.append({'name': b.name, 'access_groups': [{'afi': 'ipv4', 'acls': [{'name': b.acl, 'direction': b.direction}]}]}) -%}
+      {%- endfor -%}{{ out }}
+    state: overridden
+  register: r_acl_bind
+
+- name: BGP (process + neighbors)
+  cisco.ios.ios_bgp_global:
+    config:
+      as_number: "{{ my_asn | string }}"
+      bgp:
+        router_id:
+          address: "{{ intent.router_id }}"
+        log_neighbor_changes: true
+      neighbors: >-
+        {%- set out = [] -%}{%- for n in intent.bgp_neighbors -%}
+        {%-   set _ = out.append({'neighbor_address': n.ip, 'remote_as': n.asn, 'description': n.description}) -%}
+        {%- endfor -%}{{ out }}
+    state: replaced
+  when: my_asn is not none and my_asn | string | length > 0
+  register: r_bgp
+
+- name: BGP (advertised networks, ECMP)
+  cisco.ios.ios_bgp_address_family:
+    config:
+      as_number: "{{ my_asn | string }}"
+      address_family:
+        - afi: ipv4
+          maximum_paths:
+            paths: 4
+          networks: >-
+            {%- set out = [] -%}{%- for n in intent.bgp_networks -%}
+            {%-   set _ = out.append({'address': n | ansible.utils.ipaddr('network'), 'mask': n | ansible.utils.ipaddr('netmask')}) -%}
+            {%- endfor -%}{{ out }}
+          neighbors: >-
+            {%- set out = [] -%}{%- for n in intent.bgp_neighbors -%}
+            {%-   set _ = out.append({'neighbor_address': n.ip, 'activate': true}) -%}
+            {%- endfor -%}{{ out }}
+    state: replaced
+  when: my_asn is not none and my_asn | string | length > 0
+  register: r_bgp_af
 
 - name: Save configuration
   cisco.ios.ios_command:

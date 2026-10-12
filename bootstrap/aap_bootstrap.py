@@ -293,8 +293,11 @@ def job_templates(org_id, proj, ee_id, inv, creds):
          {"ask_variables_on_launch": True}),
         ("NetLab - Install NetBox", "playbooks/04_install_netbox.yml", "infra", ["ssh", "netbox"], {}),
         ("NetLab - Populate NetBox", "playbooks/05_populate_netbox.yml", "infra", ["ssh", "netbox"], {}),
-        ("NetLab - Configure Devices", "playbooks/06_configure_devices.yml", "devices", ["devices"],
+        ("NetLab - Configure Devices", "playbooks/06_configure_devices.yml", "devices", ["devices", "netbox"],
          {"ask_limit_on_launch": True, "ask_variables_on_launch": True}),
+        # Same playbook in check + diff mode: reports drift from NetBox, changes nothing.
+        ("NetLab - Check Config Drift", "playbooks/06_configure_devices.yml", "devices", ["devices", "netbox"],
+         {"job_type": "check", "diff_mode": True, "ask_limit_on_launch": True}),
         ("NetLab - Configure NetBox Webhook", "playbooks/07_configure_netbox_webhook.yml", "infra",
          ["ssh", "netbox", "stream", "ingest"], {"survey_enabled": True}),
         ("NetLab - Stop", "playbooks/08_stop_netlab.yml", "local", ["aws"],

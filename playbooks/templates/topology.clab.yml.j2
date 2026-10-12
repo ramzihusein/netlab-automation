@@ -13,6 +13,10 @@ topology:
     {{ kind }}:
       image: {{ os_kinds[kind].image }}
 {% endfor %}
+{% if lab_active_hosts %}
+    linux:
+      image: {{ lab_host_image }}
+{% endif %}
 
   nodes:
 {% for n in lab_active_nodes %}
@@ -22,8 +26,31 @@ topology:
       labels:
         role: {{ n.role }}
 {% endfor %}
+{% for h in lab_active_hosts %}
+{%   set leaf = lab_active_nodes | selectattr('name', 'equalto', h.leaf) | first %}
+{%   set gw = (lab_vlans | selectattr('vid', 'equalto', h.vid) | first).gateway.split('/')[0] %}
+    {{ h.name }}:
+      kind: linux
+      mgmt-ipv4: {{ h.mgmt_ip }}
+      labels:
+        role: server
+      exec:
+{%   if leaf.os == 'ios' %}
+        # IOS leaves route VLANs on 802.1Q subinterfaces: send tagged frames
+        - ip link add link eth1 name eth1.{{ h.vid }} type vlan id {{ h.vid }}
+        - ip addr add {{ h.ip }} dev eth1.{{ h.vid }}
+        - ip link set eth1.{{ h.vid }} up
+{%   else %}
+        - ip addr add {{ h.ip }} dev eth1
+{%   endif %}
+        - ip route add 172.16.0.0/16 via {{ gw }}
+        - ip route add 192.168.255.0/24 via {{ gw }}
+{% endfor %}
 
   links:
 {% for l in lab_active_links %}
     - endpoints: ["{{ l.a }}:eth{{ l.a_port }}", "{{ l.b }}:eth{{ l.b_port }}"]
+{% endfor %}
+{% for h in lab_active_hosts %}
+    - endpoints: ["{{ h.leaf }}:eth{{ h.leaf_port }}", "{{ h.name }}:eth1"]
 {% endfor %}
