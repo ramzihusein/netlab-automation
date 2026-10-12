@@ -15,8 +15,14 @@
 
   vars:
     netbox_docker_version: "3.3.0"     # netbox-docker release (ships NetBox 4.3)
+    netbox_base_image: netboxcommunity/netbox:v4.3-3.3.0
     netbox_docker_dir: /opt/netbox-docker
     netbox_port: 8000
+    # Plugins baked into a local image on top of the official one. Versions
+    # must match the NetBox release (netbox-bgp 0.16.x <-> NetBox 4.3.x).
+    netbox_plugins:
+      - package: netbox-bgp==0.16.1
+        module: netbox_bgp
 
   tasks:
 
@@ -30,15 +36,61 @@
         version: "{{ netbox_docker_version }}"
         force: false
 
-    - name: Expose NetBox on the host
+    # --------------------------------------------------------------- plugins
+    - name: List plugin packages
+      ansible.builtin.copy:
+        dest: "{{ netbox_docker_dir }}/plugin_requirements.txt"
+        mode: "0644"
+        content: |
+          {% for plugin in netbox_plugins %}
+          {{ plugin.package }}
+          {% endfor %}
+
+    - name: Define the NetBox image with plugins
+      ansible.builtin.copy:
+        dest: "{{ netbox_docker_dir }}/Dockerfile-Plugins"
+        mode: "0644"
+        content: |
+          FROM {{ netbox_base_image }}
+          COPY ./plugin_requirements.txt /opt/netbox/
+          RUN /usr/local/bin/uv pip install --python /opt/netbox/venv/bin/python -r /opt/netbox/plugin_requirements.txt
+
+    - name: Enable plugins in NetBox
+      ansible.builtin.copy:
+        dest: "{{ netbox_docker_dir }}/configuration/plugins.py"
+        mode: "0644"
+        content: |
+          # Managed by Ansible (04_install_netbox.yml)
+          PLUGINS = {{ netbox_plugins | map(attribute='module') | list | to_json }}
+          PLUGINS_CONFIG = {}
+
+    - name: Run NetBox from the plugin image and expose it on the host
       ansible.builtin.copy:
         dest: "{{ netbox_docker_dir }}/docker-compose.override.yml"
         mode: "0644"
         content: |
           services:
             netbox:
+              image: netbox:with-plugins
+              pull_policy: never
+              build:
+                context: .
+                dockerfile: Dockerfile-Plugins
               ports:
                 - "{{ netbox_port }}:8080"
+            netbox-worker:
+              image: netbox:with-plugins
+              pull_policy: never
+            netbox-housekeeping:
+              image: netbox:with-plugins
+              pull_policy: never
+
+    - name: Build the NetBox plugin image
+      ansible.builtin.command: docker compose build netbox
+      args:
+        chdir: "{{ netbox_docker_dir }}"
+      register: plugin_build
+      changed_when: "'CACHED' not in plugin_build.stderr or 'naming to' in plugin_build.stderr"
 
     # First start runs all migrations, which outlasts the container healthcheck
     # on small instances; start netbox alone, wait for its API, then the rest
@@ -153,6 +205,14 @@
       retries: 12
       delay: 10
 
+    - name: Check the BGP plugin API is served
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/plugins/bgp/session/?limit=1"
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+          Accept: application/json
+      register: bgp_plugin
+
     - name: Print NetBox summary
       ansible.builtin.debug:
-        msg: "AAP -> {{ netbox_url }} OK (authenticated)"
+        msg: "AAP -> {{ netbox_url }} OK (authenticated); BGP plugin OK ({{ bgp_plugin.json.count }} sessions)"
