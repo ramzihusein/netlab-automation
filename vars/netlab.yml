@@ -150,3 +150,9 @@ lab_config_contexts:
             - {seq: 30, action: deny, protocol: ip, src: any, dst: any, log: true}
       acl_bindings:
         - {tag: acl-servers-in, acl: SERVERS-IN, direction: in}
+  - name: NetLab - Routing
+    weight: 1000
+    description: Fabric-wide BGP settings (sessions are BGP plugin objects)
+    data:
+      bgp:
+        maximum_paths: 4

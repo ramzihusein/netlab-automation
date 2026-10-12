@@ -15,40 +15,35 @@
     os_of: "{{ dict(nodes | map(attribute='name') | zip(nodes | map(attribute='os'))) }}"
 
 # ------------------------------------------------------------ tags + ASNs
-- name: Ensure tags and the BGP ASN custom field
+- name: Ensure tags, the private-ASN RIR and one ASN per AS in the fabric
   ansible.builtin.include_tasks: nb_ensure.yml
-  loop:
-    - endpoint: extras/tags
-      lookup: {slug: acl-servers-in}
-      body: {name: acl-servers-in, slug: acl-servers-in, color: f44336,
-             description: "Bind ACL SERVERS-IN inbound (see config context NetLab - Security policy)"}
-    - endpoint: extras/tags
-      lookup: {slug: netlab-host}
-      body: {name: netlab-host, slug: netlab-host, color: 9e9e9e, description: NetLab Linux test host (not managed by AAP)}
-    - endpoint: extras/custom-fields
-      lookup: {name: bgp_asn}
-      body: {name: bgp_asn, label: BGP ASN, type: integer, object_types: [dcim.device],
-             description: eBGP autonomous system of this device, validation_minimum: 1, validation_maximum: 4294967295}
+  loop: "{{ fab_base_ops }}"
   loop_control:
     loop_var: nb
     label: "{{ nb.endpoint }} {{ nb.lookup.values() | join(' ') }}"
+  vars:
+    fab_base_ops: >-
+      {%- set out = [
+        {'endpoint': 'extras/tags', 'lookup': {'slug': 'acl-servers-in'},
+         'body': {'name': 'acl-servers-in', 'slug': 'acl-servers-in', 'color': 'f44336',
+                  'description': 'Bind ACL SERVERS-IN inbound (see config context NetLab - Security policy)'}},
+        {'endpoint': 'extras/tags', 'lookup': {'slug': 'bgp-advertise'},
+         'body': {'name': 'bgp-advertise', 'slug': 'bgp-advertise', 'color': '4caf50',
+                  'description': 'Advertise this interface subnet in BGP'}},
+        {'endpoint': 'extras/tags', 'lookup': {'slug': 'netlab-host'},
+         'body': {'name': 'netlab-host', 'slug': 'netlab-host', 'color': '9e9e9e', 'description': 'NetLab Linux test host (not managed by AAP)'}},
+        {'endpoint': 'ipam/rirs', 'lookup': {'slug': 'private-asn'},
+         'body': {'name': 'Private ASNs', 'slug': 'private-asn', 'is_private': true, 'description': 'RFC 6996 private AS numbers'}}] -%}
+      {%- for asn in nodes | map(attribute='asn') | unique -%}
+      {%-   set _ = out.append({'endpoint': 'ipam/asns', 'lookup': {'asn': asn},
+              'body': {'asn': asn | int, 'rir': {'slug': 'private-asn'}, 'tags': tag,
+                       'description': (nodes | selectattr('asn', 'equalto', asn) | map(attribute='role') | first) | title ~ ' AS'}}) -%}
+      {%- endfor -%}{{ out }}
 
 - name: Read lab devices
   ansible.builtin.uri:
     url: "{{ netbox_url }}/api/dcim/devices/?site={{ site_slug }}&limit=1000"
   register: fab_devices
-
-- name: Seed BGP ASN where none is set
-  ansible.builtin.uri:
-    url: "{{ netbox_url }}/api/dcim/devices/{{ item.id }}/"
-    method: PATCH
-    # One expression so the ASN stays an integer (NetBox rejects "65000")
-    body: "{{ {'custom_fields': {'bgp_asn': (nodes | selectattr('name', 'equalto', item.name) | first).asn | int}} }}"
-  changed_when: true
-  when: item.custom_fields.bgp_asn | default(none) is none
-  loop: "{{ fab_devices.json.results | selectattr('name', 'in', active_names) | list }}"
-  loop_control:
-    label: "{{ item.name }}"
 
 # ------------------------------------------------------- VLANs + prefixes
 - name: Ensure server VLANs
@@ -115,7 +110,7 @@
       {%- for v in fab_vlans if os_of[v.leaf] == 'eos' -%}
       {%-   set _ = out.append({'endpoint': 'dcim/interfaces', 'lookup': {'device': v.leaf, 'name': 'Vlan' ~ v.vid}, 'update': false,
              'body': {'device': {'name': v.leaf}, 'name': 'Vlan' ~ v.vid, 'type': 'virtual',
-                      'description': v.name ~ ' gateway', 'tags': tag + [{'slug': 'acl-servers-in'}]}}) -%}
+                      'description': v.name ~ ' gateway', 'tags': tag + [{'slug': 'acl-servers-in'}, {'slug': 'bgp-advertise'}]}}) -%}
       {%- endfor -%}
       {{ out }}
 
@@ -150,7 +145,7 @@
       {%-   set _ = out.append({'endpoint': 'dcim/interfaces', 'lookup': {'device': v.leaf, 'name': port ~ '.' ~ v.vid}, 'update': false,
              'body': {'device': {'name': v.leaf}, 'name': port ~ '.' ~ v.vid, 'type': 'virtual',
                       'parent': nb_iface[v.leaf ~ '|' ~ port].id, 'mode': 'access', 'untagged_vlan': nb_vlan[v.vid].id,
-                      'description': v.name ~ ' gateway', 'tags': tag + [{'slug': 'acl-servers-in'}]}}) -%}
+                      'description': v.name ~ ' gateway', 'tags': tag + [{'slug': 'acl-servers-in'}, {'slug': 'bgp-advertise'}]}}) -%}
       {%- endfor -%}
       {{ out }}
 
@@ -230,6 +225,56 @@
     label: "{{ item.leaf }}:{{ port }} <-> {{ item.name }}:eth1"
   vars:
     port: "{{ os_kinds[kind_of[item.leaf]].iface_prefix ~ (item.leaf_port + os_kinds[kind_of[item.leaf]].iface_offset) }}"
+
+# ----------------------------------------------------------- BGP sessions
+# Loopbacks (router IDs) are advertised too; tag any that predate the tag.
+- name: Tag loopbacks and gateways for BGP advertisement (where missing)
+  ansible.builtin.uri:
+    url: "{{ netbox_url }}/api/dcim/interfaces/{{ item.id }}/"
+    method: PATCH
+    body:
+      tags: "{{ item.tags | map(attribute='slug') | map('regex_replace', '^', '{\"slug\": \"') | map('regex_replace', '$', '\"}') | map('from_json') | list + [{'slug': 'bgp-advertise'}] }}"
+  changed_when: true
+  when: "'bgp-advertise' not in (item.tags | map(attribute='slug') | list)"
+  loop: >-
+    {{ fab_if_list.json.results | selectattr('device.name', 'in', active_names)
+       | selectattr('name', 'equalto', 'Loopback0') | list
+       + fab_if_list.json.results | selectattr('device.name', 'in', active_names)
+       | selectattr('tags', 'defined') | selectattr('name', 'search', '^Vlan|[.]') | list }}
+  loop_control:
+    label: "{{ item.device.name }} {{ item.name }}"
+
+- name: Read fabric IPs and ASNs
+  ansible.builtin.uri:
+    url: "{{ netbox_url }}/api/{{ item }}"
+  loop:
+    - "ipam/ip-addresses/?tag={{ netlab_tag }}&limit=1000"
+    - "ipam/asns/?limit=1000"
+  register: fab_lookups
+
+- name: Ensure one BGP session per side of every fabric link
+  ansible.builtin.include_tasks: nb_ensure.yml
+  loop: "{{ fab_session_ops }}"
+  loop_control:
+    loop_var: nb
+    label: "{{ nb.lookup.name }}"
+  vars:
+    ip_id: "{{ dict(fab_lookups.results[0].json.results | map(attribute='address') | zip(fab_lookups.results[0].json.results | map(attribute='id'))) }}"
+    asn_id: "{{ dict(fab_lookups.results[1].json.results | map(attribute='asn') | zip(fab_lookups.results[1].json.results | map(attribute='id'))) }}"
+    asn_of: "{{ dict(nodes | map(attribute='name') | zip(nodes | map(attribute='asn'))) }}"
+    fab_session_ops: >-
+      {%- set out = [] -%}
+      {%- for l in links -%}
+      {%-   set a_if = os_kinds[kind_of[l.a]].iface_prefix ~ (l.a_port + os_kinds[kind_of[l.a]].iface_offset) -%}
+      {%-   set b_if = os_kinds[kind_of[l.b]].iface_prefix ~ (l.b_port + os_kinds[kind_of[l.b]].iface_offset) -%}
+      {%-   for me, my_if, my_ip, peer, peer_if, peer_ip in [(l.a, a_if, l.a_ip, l.b, b_if, l.b_ip), (l.b, b_if, l.b_ip, l.a, a_if, l.a_ip)] -%}
+      {%-     set _ = out.append({'endpoint': 'plugins/bgp/session', 'lookup': {'name': me ~ ' to ' ~ peer}, 'update': false,
+              'body': {'name': me ~ ' to ' ~ peer, 'description': peer ~ ':' ~ peer_if,
+                       'device': {'name': me}, 'site': {'slug': site_slug}, 'status': 'active', 'tags': tag,
+                       'local_address': ip_id[my_ip], 'local_as': asn_id[asn_of[me]],
+                       'remote_address': ip_id[peer_ip], 'remote_as': asn_id[asn_of[peer]]}}) -%}
+      {%-   endfor -%}
+      {%- endfor -%}{{ out }}
 
 # -------------------------------------------------------- config contexts
 - name: Ensure config contexts (services + security policy)
