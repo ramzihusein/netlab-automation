@@ -17,28 +17,6 @@
 # plus its cabled BGP neighbors; without it every device is configured.
 # Inventory: "NetLab Devices" (NetBox, update on launch).
 
-- name: NetLab — decide which devices to configure
-  hosts: localhost
-  gather_facts: false
-
-  vars:
-    changed_device: ""
-
-  tasks:
-    - name: Work out the blast radius from NetBox cabling
-      ansible.builtin.set_fact:
-        nb_targets: >-
-          {{ groups['all'] if not changed_device else
-             ([changed_device] + (hostvars[changed_device].interfaces | default([])
-               | map(attribute='link_peers') | flatten | map(attribute='device.name') | list
-               if changed_device in groups['all'] else []))
-             | select('in', groups['all']) | unique | list }}
-
-    - name: Show scope
-      ansible.builtin.debug:
-        msg: "{{ ('Change on ' ~ changed_device ~ ' -> ') if changed_device else 'Full run -> ' }}{{ nb_targets | join(', ') or 'nothing in inventory' }}"
-
-
 - name: NetLab — push NetBox intent to devices
   hosts: all
   gather_facts: false
@@ -54,11 +32,28 @@
 
   tasks:
 
-    # The play's host pattern is fixed before play 1 runs, so scope here. If a
-    # --limit skipped play 1, nb_targets is unset and every limited host runs.
+    # Scope is computed inside this play (not a localhost play): EDA launches
+    # with limit=all, which excludes the implicit localhost.
+    - name: Work out the blast radius from NetBox cabling
+      ansible.builtin.set_fact:
+        nb_targets: >-
+          {{ ansible_play_hosts_all if not changed_device else
+             ([changed_device] + (hostvars[changed_device].interfaces | default([])
+               | map(attribute='link_peers') | flatten | map(attribute='device.name') | list
+               if changed_device in hostvars else []))
+             | select('in', ansible_play_hosts_all) | unique | list }}
+      run_once: true
+      vars:
+        changed_device: "{{ changed_device | default('') }}"
+
+    - name: Show scope
+      ansible.builtin.debug:
+        msg: "{{ ('Change on ' ~ changed_device ~ ' -> ') if changed_device | default('') else 'Full run -> ' }}{{ nb_targets | join(', ') or 'nothing in inventory' }}"
+      run_once: true
+
     - name: Skip devices outside the blast radius
       ansible.builtin.meta: end_host
-      when: inventory_hostname not in (hostvars['localhost'].nb_targets | default(ansible_play_hosts_all))
+      when: inventory_hostname not in nb_targets
 
     # ------------------------------------------------------- NetBox data
     # A url lookup runs on the controller, so this works even when a --limit
