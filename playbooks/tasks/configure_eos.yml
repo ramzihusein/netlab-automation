@@ -108,10 +108,11 @@
     config: >-
       {%- set out = [] -%}{%- for b in intent.acl_bindings -%}
       {%-   set _ = out.append({'name': b.name, 'access_groups': [{'afi': 'ipv4', 'acls': [{'name': b.acl, 'direction': b.direction}]}]}) -%}
-      {%- endfor -%}{{ out if out else (intent.ifs | map(attribute='name') | map('regex_replace', '^', '{"name": "') | map('regex_replace', '$', '"}') | map('from_json') | list) }}
-    # overridden needs at least one binding; with none in NetBox, remove any
-    # binding from every interface (eos_acl_interfaces needs the names listed)
-    state: "{{ 'overridden' if intent.acl_bindings else 'deleted' }}"
+      {%- endfor -%}{{ out }}
+    state: overridden
+  # eos_acl_interfaces crashes on state deleted when nothing is bound, so a
+  # device with no tagged interfaces in NetBox (the spines) skips this.
+  when: intent.acl_bindings | length > 0
   register: r_acl_bind
 
 - name: BGP
