@@ -41,6 +41,16 @@
       loop: "{{ nb_targets }}"
       changed_when: false
 
+    - name: Read VLAN names from NetBox
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/vlans/?limit=1000"
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+          Accept: application/json
+        validate_certs: false
+      register: nb_vlans_api
+      check_mode: false
+
     - name: Show scope
       ansible.builtin.debug:
         msg: "{{ ('Change on ' ~ changed_device ~ ' -> ') if changed_device else 'Full run -> ' }}{{ nb_targets | join(', ') or 'nothing in inventory' }}"
@@ -62,24 +72,14 @@
   tasks:
 
     # ------------------------------------------------------- NetBox data
-    - name: Read VLAN names from NetBox
-      ansible.builtin.uri:
-        url: "{{ netbox_url }}/api/ipam/vlans/?limit=1000"
-        headers:
-          Authorization: "Token {{ netbox_token }}"
-          Accept: application/json
-        validate_certs: false
-      register: nb_vlans_api
-      delegate_to: localhost
-      run_once: true
-      check_mode: false
-
     - name: Render intent from NetBox
       ansible.builtin.set_fact:
         cc: "{{ (config_context | default([{}]) | first) if config_context is not mapping else config_context }}"
         nb_ifaces: "{{ interfaces | default([]) | rejectattr('mgmt_only') | list }}"
-        vlan_name: "{{ dict(nb_vlans_api.json.results | map(attribute='vid') | zip(nb_vlans_api.json.results | map(attribute='name'))) }}"
+        vlan_name: "{{ dict(_vl | map(attribute='vid') | zip(_vl | map(attribute='name'))) }}"
         my_asn: "{{ custom_fields.bgp_asn | default(none) }}"
+      vars:
+        _vl: "{{ hostvars['localhost'].nb_vlans_api.json.results }}"
 
     - name: Render interfaces, VLANs, BGP and ACL bindings
       ansible.builtin.set_fact:
