@@ -220,18 +220,41 @@ Notes for customer conversations:
 
 | Config | Lives in NetBox as | Change it → |
 |---|---|---|
-| BGP ASN | device custom field **BGP ASN** | device + its BGP neighbors reconfigured |
-| BGP neighbors | **derived** from cables + the peer interface's /31 | (edit cables / IPs) |
-| Advertised networks | loopback + every non-point-to-point interface IP | |
+| BGP sessions | **Plugins → BGP → Sessions** (netbox-bgp): local/remote IP + AS, status | that device + its neighbors; **Offline** = neighbor shut down |
+| BGP ASNs | **IPAM → ASNs** (referenced by the sessions) | all devices |
+| Advertised networks | interfaces tagged `bgp-advertise` (loopbacks, VLAN gateways) | that device |
+| ECMP (`maximum-paths`) | config context **NetLab - Routing** | all devices |
 | VLANs | IPAM → VLANs, interface mode / untagged / tagged VLAN | all devices |
 | Gateways | `Vlan<vid>` SVIs (EOS), `<port>.<vid>` subinterfaces (IOS) | that device |
 | NTP, DNS, syslog, SNMP, banner | config context **NetLab - Global services** | all devices |
 | ACLs | config context **NetLab - Security policy** | all devices |
 | ACL bindings | interface tag `acl-servers-in` (bound per `acl_bindings`) | that device |
 
-`06_configure_devices.yml` renders this intent per device and enforces it with
-`arista.eos` / `cisco.ios` resource modules (`state: replaced`), so it's
-idempotent: a second run reports "Already matched NetBox".
+### How the device playbooks are organised
+
+`playbooks/configure_network.yml` (jobs **Configure Devices** and **Check Config
+Drift**) is just a list of roles, one per feature:
+
+```yaml
+roles:
+  - netbox_scope      # which devices does this change affect?
+  - base_services     # hostname, DNS, SNMP, LLDP, NTP, syslog, banner
+  - vlans             # VLANs on switch ports and VLAN interfaces
+  - interfaces        # descriptions, state, switchports, subinterfaces, IPs
+  - acls              # access lists, applied by interface tag
+  - bgp               # sessions from the NetBox BGP plugin
+  - save_config
+  - report
+```
+
+Each role is `tasks/main.yml` (a few lines), `tasks/eos.yml` + `tasks/ios.yml`
+(one resource-module task per thing), and `templates/*.yml.j2` that look like
+the data each module takes. `configure_<feature>.yml` runs a single role (jobs
+**NetLab - Configure BGP / VLANs / Interfaces / ACLs / Base Services**).
+Connection settings per vendor are in `playbooks/group_vars/platforms_*.yml`.
+
+All modules use `state: replaced`, so runs are idempotent ("Already matched
+NetBox") and the check-mode job reports real drift only.
 
 cEOS-lab can't bind ACLs to interfaces (no data-plane ACLs, the command is
 rejected as unsupported), so EOS bindings are only pushed with
@@ -253,6 +276,11 @@ on all devices; bindings are enforced on the Cisco c8000v leaves.
 - Edit the config context (add/remove an NTP server, change the banner) →
   one job for all devices; removals are removed from the devices too
 - Tag another interface `acl-servers-in` → ACL bound on it (Cisco)
+
+**BGP from NetBox**
+- Plugins → BGP → Sessions → `eos-leaf1 to ios-spine2` → Status **Offline** →
+  EDA runs Configure Devices for eos-leaf1 (+ neighbors) → `neighbor … shutdown`,
+  session goes Idle(Admin); set it back to **Active** and it re-establishes
 
 **Traffic across the fabric**
 `ssh netlab` → `sudo docker exec clab-netlab-host1 ping 172.16.30.10`
