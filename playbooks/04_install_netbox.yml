@@ -34,7 +34,9 @@
         repo: https://github.com/netbox-community/netbox-docker.git
         dest: "{{ netbox_docker_dir }}"
         version: "{{ netbox_docker_version }}"
-        force: false
+        # Clone once; we edit tracked files (configuration/plugins.py), so a
+        # later update would refuse. Bump netbox_docker_version deliberately.
+        update: false
 
     # --------------------------------------------------------------- plugins
     - name: List plugin packages
