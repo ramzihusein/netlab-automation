@@ -92,8 +92,9 @@
     config: >-
       {%- set out = [] -%}{%- for b in intent.acl_bindings -%}
       {%-   set _ = out.append({'name': b.name, 'access_groups': [{'afi': 'ipv4', 'acls': [{'name': b.acl, 'direction': b.direction}]}]}) -%}
-      {%- endfor -%}{{ out }}
-    state: overridden
+      {%- endfor -%}{{ out if out else omit }}
+    # overridden needs at least one binding; with none in NetBox, remove them all
+    state: "{{ 'overridden' if intent.acl_bindings else 'deleted' }}"
   register: r_acl_bind
 
 - name: BGP (process + neighbors)
