@@ -8,8 +8,8 @@
 #   nb.lookup    query params that identify the object, e.g. {name: eos-leaf1}
 #   nb.body      fields to create/patch
 #   nb.update    optional (default true); false = create only, never overwrite
-#                (read as nb['update']: nb.update is the dict's .update method)
-#                edits people made in NetBox
+#                edits people made in NetBox (read as nb['update'], because
+#                nb.update would be the dict's .update method)
 #   nb.secret    optional, hide body from logs
 # Output: nb_obj (the object as returned by NetBox)
 
