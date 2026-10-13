@@ -93,7 +93,7 @@
       {%- for n in nodes -%}
       {%-   set _ = out.append({'address': n.mgmt_ip ~ '/' ~ lab_mgmt_prefixlen, 'device': n.name, 'interface': os_kinds[n.kind].mgmt_iface,
                                 'description': n.name ~ ' mgmt', 'tags': [netlab_tag]}) -%}
-      {%-   set _ = out.append({'address': n.loopback, 'device': n.name, 'interface': 'Loopback0', 'role': 'loopback',
+      {%-   set _ = out.append({'address': n.loopback, 'device': n.name, 'interface': 'Loopback0', 'role': 'Loopback',
                                 'description': n.name ~ ' router-id', 'tags': [netlab_tag]}) -%}
       {%- endfor -%}
       {%- for l in links -%}
