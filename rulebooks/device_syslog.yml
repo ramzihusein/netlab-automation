@@ -11,6 +11,8 @@
 
 - name: Self-heal out-of-band changes
   hosts: all
+  # Heal devices side by side rather than one job after another.
+  execution_strategy: parallel
   sources:
     - name: device_syslog
       ansible.eda.webhook:
