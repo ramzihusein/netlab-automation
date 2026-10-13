@@ -21,6 +21,8 @@
     restore_file:
       arista.eos.eos: /mnt/flash/netlab-restore.cfg
       cisco.ios.ios: bootflash:netlab-restore.cfg
+    # libssh's SCP fails against the IOS SCP server; paramiko's works.
+    ansible_network_cli_ssh_type: "{{ 'paramiko' if ansible_network_os == 'cisco.ios.ios' else 'libssh' }}"
 
   tasks:
 
