@@ -195,7 +195,7 @@
       netbox.netbox.netbox_device:
         data:
           name: "{{ item.name }}"
-          role: "{{ item.role }}"
+          device_role: "{{ item.role }}"
           device_type: "{{ os_kinds[item.kind].device_type }}"
           platform: "{{ item.os }}"
           site: "{{ site_slug }}"
@@ -211,7 +211,7 @@
       netbox.netbox.netbox_device:
         data:
           name: "{{ item.name }}"
-          role: server
+          device_role: server
           device_type: Linux container
           site: "{{ site_slug }}"
           status: active
