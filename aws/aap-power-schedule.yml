@@ -183,6 +183,15 @@ Resources:
             Type: Task
             Resource: arn:aws:states:::aws-sdk:ec2:startInstances
             Arguments: {InstanceIds: "{% $states.input %}"}
+            # One instance type out of capacity in its AZ fails the whole call
+            # (seen 2026-10-13: "Insufficient capacity", 500). It usually clears
+            # within minutes; keep trying for ~an hour before giving up.
+            Retry:
+              - ErrorEquals: [Ec2.Ec2Exception, Ec2.InsufficientInstanceCapacityException, Ec2.Ec2InternalErrorException]
+                IntervalSeconds: 60
+                BackoffRate: 1.5
+                MaxDelaySeconds: 300
+                MaxAttempts: 15
             Next: WaitBoot
           WaitBoot:
             Type: Wait
