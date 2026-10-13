@@ -666,6 +666,48 @@ def vlan_workflow(org_id, jts):
     return wf
 
 
+def linux_side(org_id, proj, creds):
+    """Linux configuration management demo: servers web1/web2/db1 (EC2), their
+    inventory, and the job templates, all on the Linux EE."""
+    print("Linux demo")
+    inv, _ = ensure(f"{C}/inventories/", "Linux Servers", {
+        "organization": org_id, "description": "Linux demo servers (EC2 tag Project=netlab-linux)"})
+    ensure(f"{C}/inventory_sources/", "Linux EC2", {
+        "inventory": inv["id"], "source": "ec2", "credential": creds["aws"],
+        "overwrite": True, "update_on_launch": True, "update_cache_timeout": 0,
+        "source_vars": yaml_vars({
+            "regions": ["us-east-2"],
+            "filters": {"tag:Project": "netlab-linux", "instance-state-name": "running"},
+            "hostnames": ["tag:Name"],
+            # Groups named after the tag values: web, db, rhel, ubuntu.
+            "keyed_groups": [{"key": "tags.Role", "separator": ""}, {"key": "tags.OS", "separator": ""}],
+            "compose": {"ansible_host": "private_ip_address",
+                        "ansible_user": "'ec2-user' if tags.OS == 'rhel' else 'ubuntu'"},
+        }),
+    }, inventory=inv["id"])
+    linux_ee = find(f"{C}/execution_environments/", LINUX_EE)["id"]
+    local = find(f"{C}/inventories/", LOCAL_INVENTORY)["id"]
+    pv = {k: PROVISION_VARS[k] for k in ("vpc_id", "subnet_id", "key_pair_name", "aap_security_group_ids",
+                                          "route53_zone_id", "admin_cidrs")}
+    specs = [
+        ("Linux - Provision / Start Servers", "playbooks/linux_provision.yml", local, ["aws"],
+         {"extra_vars": yaml_vars(pv)}),
+    ]
+    jts = {}
+    for name, playbook, inventory, cred_keys, extra in specs:
+        jt, _ = ensure(f"{C}/job_templates/", name, dict({
+            "job_type": "run", "organization": org_id, "project": proj["id"], "playbook": playbook,
+            "inventory": inventory, "execution_environment": linux_ee,
+            "description": f"Linux demo: {playbook}",
+        }, **extra))
+        have = {c["id"] for c in api("GET", f"{C}/job_templates/{jt['id']}/credentials/")["results"]}
+        for key in cred_keys:
+            if creds[key] not in have:
+                api("POST", f"{C}/job_templates/{jt['id']}/credentials/", {"id": creds[key]})
+        jts[name] = jt
+    return inv, jts
+
+
 def remediate_workflow(org_id, jts):
     """Show the drift, approve, put NetBox's config back, prove it's in sync.
     Also the quick way to reset the lab after a demo."""
@@ -920,6 +962,7 @@ def main():
     wf = workflow(org_id, jts)
     vlan_wf = vlan_workflow(org_id, jts)
     remediate_workflow(org_id, jts)
+    linux_side(org_id, proj, creds)
     rbac(jts, [vlan_wf["id"]], inv, a.secrets_out)
     if not a.skip_eda:
         print("EDA project + rulebook activations")

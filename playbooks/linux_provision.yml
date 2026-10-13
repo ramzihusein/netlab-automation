@@ -1,0 +1,135 @@
+---
+# Job Template: Linux - Provision / Start Servers
+# Purpose: Creates (or starts, if stopped) the Linux demo servers in the AAP
+#          VPC and publishes their DNS names:
+#            web1  RHEL 9         web server
+#            web2  Ubuntu 24.04   web server (same playbooks, other distro)
+#            db1   RHEL 9         database server
+#          Inventory "Linux Servers" finds them by tag Project=netlab-linux
+#          and groups them by tag Role (web, db) and OS (rhel, ubuntu).
+#
+# Required AAP Credentials: "AWS Creds"
+# Required AAP Variables (set in Job Template): same as NetLab - Provision Infra
+#   vpc_id, subnet_id, key_pair_name, aap_security_group_ids, route53_zone_id,
+#   admin_cidrs
+
+- name: Linux demo servers — AWS
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../vars/netlab.yml
+
+  vars:
+    instance_type: t3.small
+    ubuntu_ami_param: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+    servers:
+      - {name: web1, os: rhel, role: web}
+      - {name: web2, os: ubuntu, role: web}
+      - {name: db1, os: rhel, role: db}
+    common_tags:
+      Project: netlab-linux
+      ManagedBy: ansible
+      # Stopped with AAP every evening by the AWS power schedule; this job
+      # starts them again.
+      PowerSchedule: stop-only
+
+  tasks:
+
+    - name: Find the newest RHEL 9 image (Red Hat's own, pay-as-you-go)
+      amazon.aws.ec2_ami_info:
+        region: "{{ aws_region }}"
+        owners: ["309956199498"]
+        filters:
+          name: RHEL-9.*_HVM-*-x86_64-*-Hourly2-GP3
+          state: available
+      register: rhel_images
+
+    - name: Pick the images
+      ansible.builtin.set_fact:
+        images:
+          rhel: "{{ (rhel_images.images | sort(attribute='name') | last).image_id }}"
+          ubuntu: "{{ lookup('amazon.aws.ssm_parameter', ubuntu_ami_param, region=aws_region) }}"
+
+    - name: Security group (SSH from AAP and admins, HTTP to look at the web servers)
+      amazon.aws.ec2_security_group:
+        name: netlab-linux-sg
+        description: Linux demo servers
+        vpc_id: "{{ vpc_id }}"
+        region: "{{ aws_region }}"
+        rules: >-
+          {{
+            [{'proto': 'tcp', 'ports': [22, 80], 'cidr_ip': admin_cidrs, 'rule_desc': 'admin'}]
+            + (aap_security_group_ids | map('regex_replace', '^', '{"proto": "tcp", "ports": [22, 80], "rule_desc": "AAP", "group_id": "') | map('regex_replace', '$', '"}') | map('from_json') | list)
+          }}
+        tags: "{{ common_tags | combine({'Name': 'netlab-linux-sg'}) }}"
+      register: linux_sg
+
+    - name: Launch or start the servers
+      amazon.aws.ec2_instance:
+        name: "{{ item.name }}"
+        region: "{{ aws_region }}"
+        instance_type: "{{ instance_type }}"
+        image_id: "{{ images[item.os] }}"
+        key_name: "{{ key_pair_name }}"
+        vpc_subnet_id: "{{ subnet_id }}"
+        security_groups: ["{{ linux_sg.group_id }}"]
+        network:
+          assign_public_ip: true
+        volumes:
+          - device_name: /dev/sda1      # root disk on both images
+            ebs:
+              volume_size: 20
+              volume_type: gp3
+              delete_on_termination: true
+              encrypted: true
+        filters:
+          "tag:Name": "{{ item.name }}"
+          "tag:Project": netlab-linux
+          instance-state-name: [pending, running, stopping, stopped]
+        tags: "{{ common_tags | combine({'Role': item.role, 'OS': item.os}) }}"
+        wait: true
+        state: running
+      loop: "{{ servers }}"
+      loop_control:
+        label: "{{ item.name }} ({{ item.os }}, {{ item.role }})"
+      register: launched
+
+    - name: Re-read the servers for their final addresses
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+        filters:
+          "tag:Project": netlab-linux
+          instance-state-name: running
+      register: running
+
+    - name: Publish DNS names (<name>.{{ dns_zone }})
+      amazon.aws.route53:
+        hosted_zone_id: "{{ route53_zone_id }}"
+        record: "{{ item.tags.Name }}.{{ dns_zone }}"
+        type: A
+        ttl: 60
+        value: "{{ item.public_ip_address }}"
+        overwrite: true
+        state: present
+      loop: "{{ running.instances }}"
+      loop_control:
+        label: "{{ item.tags.Name }}.{{ dns_zone }} -> {{ item.public_ip_address }}"
+
+    - name: Wait for SSH (from the AAP execution node)
+      ansible.builtin.wait_for:
+        host: "{{ item.private_ip_address }}"
+        port: 22
+        delay: 5
+        timeout: 600
+      loop: "{{ running.instances }}"
+      loop_control:
+        label: "{{ item.tags.Name }}"
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg: "ssh {{ 'ec2-user' if item.tags.OS == 'rhel' else 'ubuntu' }}@{{ item.tags.Name }}.{{ dns_zone }}  ({{ item.tags.OS }}, {{ item.tags.Role }}, {{ item.private_ip_address }})"
+      loop: "{{ running.instances | sort(attribute='tags.Name') }}"
+      loop_control:
+        label: "{{ item.tags.Name }}"
