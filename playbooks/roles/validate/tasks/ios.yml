@@ -22,7 +22,7 @@
 
 - name: Spine has a route to the new VLAN (Cisco)
   cisco.ios.ios_command:
-    commands: "show ip route {{ gateway_cidr | ansible.utils.ipaddr('network/prefix') }}"
+    commands: "show ip route {{ gateway_cidr | ansible.utils.ipaddr('network') }} {{ gateway_cidr | ansible.utils.ipaddr('netmask') }}"
     wait_for: result[0] contains {{ gateway_cidr | ansible.utils.ipaddr('network/prefix') }}
     retries: 6
     interval: 10
