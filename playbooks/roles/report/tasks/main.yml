@@ -14,3 +14,21 @@
       {%- for name in query('ansible.builtin.varnames', '^r_') -%}
       {%-   if lookup('ansible.builtin.vars', name) is changed -%}{%- set _ = out.append(name[2:]) -%}{%- endif -%}
       {%- endfor -%}{{ out }}
+
+# The commands behind that line: what was sent, or in check mode what would
+# be sent to put the device back the way NetBox says. Resource modules return
+# them as "commands"; config-line tasks as "updates" (per item when looped).
+- name: Show the commands, per area
+  ansible.builtin.debug:
+    msg: "{{ commands_by_area }}"
+  vars:
+    commands_by_area: >-
+      {%- set out = {} -%}
+      {%- for name in query('ansible.builtin.varnames', '^r_') -%}
+      {%-   set r = lookup('ansible.builtin.vars', name) -%}
+      {%-   if r is changed -%}
+      {%-     set _ = out.update({name[2:]: r.commands | default(r.updates)
+                | default(r.results | default([]) | map(attribute='commands', default=[]) | flatten)}) -%}
+      {%-   endif -%}
+      {%- endfor -%}{{ out }}
+  when: commands_by_area | length > 0
