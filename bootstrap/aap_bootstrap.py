@@ -692,7 +692,7 @@ def linux_side(org_id, proj, creds):
     servers = inv["id"]
     specs = [
         ("Linux - Provision / Start Servers", "playbooks/linux_provision.yml", local, ["aws"],
-         {"extra_vars": yaml_vars(pv)}),
+         {"extra_vars": yaml_vars(pv), "survey_enabled": True}),
         ("Linux - Server Inventory Report", "playbooks/linux_report.yml", servers, ["ssh"],
          {"ask_limit_on_launch": True}),
         ("Linux - Manage Users", "playbooks/linux_users.yml", servers, ["ssh"],
@@ -734,6 +734,9 @@ def linux_side(org_id, proj, creds):
         return {"question_name": question, "question_description": description, "variable": variable,
                 "type": "multiplechoice", "choices": choices, "default": default, "required": True}
 
+    rebuild_q = choice("Start from brand-new servers?", "rebuild", ["no", "yes"], "no",
+                       "yes = terminate web1/web2/db1 and build fresh ones from the RHEL/Ubuntu images")
+    survey("Linux - Provision / Start Servers", "Servers", [rebuild_q])
     survey("Linux - Install Packages", "Packages", [
         {"question_name": "Extra packages (comma separated, optional)", "variable": "extra_packages",
          "type": "text", "default": "", "required": False,
@@ -764,6 +767,9 @@ def linux_side(org_id, proj, creds):
         "organization": org_id,
         "description": "Provision/start servers, packages, users, baseline, RHEL System Roles, web app, report",
     })
+    api("PATCH", f"{C}/workflow_job_templates/{wf['id']}/", {"survey_enabled": True})
+    api("POST", f"{C}/workflow_job_templates/{wf['id']}/survey_spec/",
+        {"name": "Fleet", "description": "", "spec": [rebuild_q]})
     nodes_path = f"{C}/workflow_job_templates/{wf['id']}/workflow_nodes/"
     if not api("GET", nodes_path)["count"]:
         chain = ["Linux - Provision / Start Servers", "Linux - Install Packages", "Linux - Manage Users",

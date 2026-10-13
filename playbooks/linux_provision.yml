@@ -1,7 +1,9 @@
 ---
 # Job Template: Linux - Provision / Start Servers
 # Purpose: Creates (or starts, if stopped) the Linux demo servers in the AAP
-#          VPC and publishes their DNS names:
+#          VPC and publishes their DNS names. With rebuild=yes (survey) the
+#          old servers are terminated first, for a clean demo with a real
+#          patch backlog:
 #            web1  RHEL 9         web server
 #            web2  Ubuntu 24.04   web server (same playbooks, other distro)
 #            db1   RHEL 9         database server
@@ -22,6 +24,7 @@
     - ../vars/netlab.yml
 
   vars:
+    rebuild: "no"
     instance_type: t3.small
     ubuntu_ami_param: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
     servers:
@@ -65,6 +68,16 @@
           }}
         tags: "{{ common_tags | combine({'Name': 'netlab-linux-sg'}) }}"
       register: linux_sg
+
+    - name: Terminate the old servers (rebuild)
+      amazon.aws.ec2_instance:
+        region: "{{ aws_region }}"
+        filters:
+          "tag:Project": netlab-linux
+          instance-state-name: [pending, running, stopping, stopped]
+        state: absent
+        wait: true
+      when: rebuild | bool
 
     - name: Launch or start the servers
       amazon.aws.ec2_instance:
