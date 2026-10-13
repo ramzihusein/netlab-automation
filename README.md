@@ -84,6 +84,9 @@ Created by `bootstrap/aap_bootstrap.py` (idempotent):
 | Credential | NetLab NetBox | URL `http://netbox-int.aap.ramzidev.com:8000` |
 | Credential | NetLab Devices | `admin` / `admin` (containerlab defaults, VPC-only) |
 | Credential | NetLab EDA Event Stream | event stream URL + token for the NetBox webhook |
+| Credential type | Container Registry Login | `ee_registry*` vars (build job) |
+| Credential | NetLab Hub Registry / NetLab Hub Push | automation hub login (AAP admin); type the password in the AAP UI once |
+| Execution environment | NetLab EE | `ee/execution-environment.yml`, used by Populate NetBox |
 | Inventory | NetLab Infra | `aws_ec2`, tag `Project=netlab`, groups `role_labhost`, `role_netbox` |
 | Inventory | NetLab Devices | NetBox (`inventories/netbox.yml`), update on launch |
 | Workflow | NetLab - Start (build if needed) | 01 → (02 → 03, 04) → 05 → 06 → 07 |
@@ -103,10 +106,33 @@ AAP_URL=https://gateway.aap.ramzidev.com AAP_TOKEN=<token> \
 | 02 | Configure Lab Host | Docker, containerlab, routed mgmt bridge, import/build images |
 | 03 | Deploy Lab | render `topology.clab.yml`, deploy, verify SSH to every device from AAP |
 | 04 | Install NetBox | netbox-docker 3.3.0 (NetBox 4.3), admin user, AAP API token |
-| 05 | Populate NetBox | site, roles, platforms, devices, interfaces, IPs, cables (create-only); verify NetBox → devices |
+| 05 | Populate NetBox | everything in `vars/netlab.yml` with the `netbox.netbox` modules (lab objects create-only); verify NetBox → devices. Runs on **NetLab EE** |
 | 06 | Configure Devices | NetBox intent → hostname, interface description/state/IPv4 (`replaced`) |
 | 07 | Configure NetBox Webhook | NetBox webhook + event rule → EDA event stream; verify NetBox → AAP |
+| 09 | Build Execution Environment | ansible-builder v3 on the lab host → push `netlab-ee` to the automation hub |
 | 99 | Teardown | route, DNS, instances, SGs (images kept unless asked) |
+
+## Execution environment (`ee/`)
+
+`ee/execution-environment.yml` is an **ansible-builder v3** definition
+(`version: 3`): the supported AAP 2.6 EE (`ee-supported-rhel9`, pulled from
+the automation hub that ships with AAP, so no registry.redhat.io login is
+needed) plus the `netbox.netbox` collection and `pynetbox`. Only Populate
+NetBox needs it; everything else stays on the default EE.
+
+To change it, edit the files in `ee/`, push, and run **NetLab - Build
+Execution Environment**. It builds on the lab host, checks the collection and
+pynetbox are in the image, and pushes `netlab-ee:latest` plus a dated tag
+(e.g. `netlab-ee:20261013-0201`) for rollback. AAP pulls it as
+`ip-10-0-1-147.us-east-2.compute.internal/netlab-ee` (the gateway's
+certificate is issued for node names, which the execution nodes trust).
+
+Build by hand (anywhere with podman):
+
+```bash
+pip install 'ansible-builder>=3.1,<4'
+cd ee && ansible-builder build -t netlab-ee:latest --extra-build-cli-args=--tls-verify=false
+```
 
 ## Demo: NetBox drives the network
 
