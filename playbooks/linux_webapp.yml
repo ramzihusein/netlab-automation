@@ -1,0 +1,81 @@
+---
+# Job Template: Linux - Deploy Web App
+# Purpose: Deploy a release to the web servers (web1 RHEL, web2 Ubuntu), one
+#          server at a time: install and start nginx, open the firewall,
+#          publish the page, and check it answers before moving on.
+#          Open http://web1.aap.ramzidev.com and http://web2.aap.ramzidev.com
+#          to watch the release roll out.
+#
+# Survey: app_version, app_message, app_color
+#
+# Required AAP Credentials: "EC2" (SSH key)
+
+- name: Deploy the web app
+  hosts: web
+  become: true
+  serial: 1                    # rolling deployment
+  max_fail_percentage: 0       # a server that fails its check stops the rollout
+
+  vars:
+    app_version: "1.0"
+    app_message: Hello from Ansible Automation Platform
+    app_color: red
+    app_colors:
+      red: "#ee0000"
+      blue: "#0066cc"
+      green: "#3e8635"
+      purple: "#5e40be"
+    # Where nginx serves pages from on each family
+    web_root: "{{ '/var/www/html' if ansible_os_family == 'Debian' else '/usr/share/nginx/html' }}"
+
+  tasks:
+
+    - name: nginx installed
+      ansible.builtin.package:
+        name: nginx
+        state: present
+
+    - name: nginx running and started at boot
+      ansible.builtin.service:
+        name: nginx
+        state: started
+        enabled: true
+
+    - name: Read the services (is a host firewall running?)
+      ansible.builtin.service_facts:
+
+    - name: Allow HTTP (RHEL, firewalld)
+      ansible.posix.firewalld:
+        service: http
+        permanent: true
+        immediate: true
+        state: enabled
+      when: ansible_facts.services['firewalld.service'].state | default('') == 'running'
+
+    - name: Allow HTTP (Ubuntu, ufw)
+      community.general.ufw:
+        rule: allow
+        port: "80"
+        proto: tcp
+      when: ansible_os_family == 'Debian'
+
+    - name: Publish release v{{ app_version }}
+      ansible.builtin.template:
+        src: linux/index.html.j2     # playbooks/templates/linux/index.html.j2
+        dest: "{{ web_root }}/index.html"
+        mode: "0644"
+
+    - name: Check the server answers with the new release before moving on
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}/"
+        return_content: true
+      register: page
+      until: ("Release v" ~ app_version) in page.content
+      retries: 5
+      delay: 3
+      delegate_to: localhost
+      become: false
+
+    - name: Live
+      ansible.builtin.debug:
+        msg: "http://{{ inventory_hostname }}.aap.ramzidev.com is serving v{{ app_version }}"

@@ -689,9 +689,29 @@ def linux_side(org_id, proj, creds):
     local = find(f"{C}/inventories/", LOCAL_INVENTORY)["id"]
     pv = {k: PROVISION_VARS[k] for k in ("vpc_id", "subnet_id", "key_pair_name", "aap_security_group_ids",
                                           "route53_zone_id", "admin_cidrs")}
+    servers = inv["id"]
     specs = [
         ("Linux - Provision / Start Servers", "playbooks/linux_provision.yml", local, ["aws"],
          {"extra_vars": yaml_vars(pv)}),
+        ("Linux - Server Inventory Report", "playbooks/linux_report.yml", servers, ["ssh"],
+         {"ask_limit_on_launch": True}),
+        ("Linux - Manage Users", "playbooks/linux_users.yml", servers, ["ssh"],
+         {"diff_mode": True, "ask_limit_on_launch": True}),
+        ("Linux - Install Packages", "playbooks/linux_packages.yml", servers, ["ssh"],
+         {"survey_enabled": True, "ask_limit_on_launch": True}),
+        ("Linux - Apply Config Baseline", "playbooks/linux_baseline.yml", servers, ["ssh"],
+         {"diff_mode": True, "ask_limit_on_launch": True}),
+        # Same playbook in check + diff mode: shows drift from the baseline, changes nothing.
+        ("Linux - Check Baseline Drift", "playbooks/linux_baseline.yml", servers, ["ssh"],
+         {"job_type": "check", "diff_mode": True, "ask_limit_on_launch": True}),
+        ("Linux - RHEL System Roles (time sync + SELinux)", "playbooks/linux_rhel_system_roles.yml", servers,
+         ["ssh"], {"diff_mode": True}),
+        ("Linux - Patch Servers", "playbooks/linux_patching.yml", servers, ["ssh"],
+         {"survey_enabled": True, "ask_limit_on_launch": True}),
+        ("Linux - Deploy Web App", "playbooks/linux_webapp.yml", servers, ["ssh"],
+         {"survey_enabled": True}),
+        ("Linux - Manage a Service", "playbooks/linux_service.yml", servers, ["ssh"],
+         {"survey_enabled": True, "ask_limit_on_launch": True}),
     ]
     jts = {}
     for name, playbook, inventory, cred_keys, extra in specs:
@@ -705,6 +725,55 @@ def linux_side(org_id, proj, creds):
             if creds[key] not in have:
                 api("POST", f"{C}/job_templates/{jt['id']}/credentials/", {"id": creds[key]})
         jts[name] = jt
+
+    def survey(jt_name, title, spec):
+        api("POST", f"{C}/job_templates/{jts[jt_name]['id']}/survey_spec/",
+            {"name": title, "description": "", "spec": spec})
+
+    def choice(question, variable, choices, default, description=""):
+        return {"question_name": question, "question_description": description, "variable": variable,
+                "type": "multiplechoice", "choices": choices, "default": default, "required": True}
+
+    survey("Linux - Install Packages", "Packages", [
+        {"question_name": "Extra packages (comma separated, optional)", "variable": "extra_packages",
+         "type": "text", "default": "", "required": False,
+         "question_description": "On top of vars/linux/packages.yml, e.g. tree,wget"},
+        choice("What to do with them", "package_state", ["present", "latest", "absent"], "present",
+               "present = install if missing; latest = also update; absent = remove"),
+    ])
+    survey("Linux - Patch Servers", "Patching", [
+        choice("Patch scope", "patch_scope", ["report", "security", "all"], "report",
+               "report = list pending updates only; security = security updates; all = every update"),
+        choice("Reboot", "reboot_policy", ["if_needed", "never"], "if_needed",
+               "if_needed = reboot only when the update requires it"),
+    ])
+    survey("Linux - Deploy Web App", "Release", [
+        {"question_name": "Version", "variable": "app_version", "type": "text", "default": "1.0",
+         "required": True},
+        {"question_name": "Message on the page", "variable": "app_message", "type": "text",
+         "default": "Hello from Ansible Automation Platform", "required": True},
+        choice("Page colour", "app_color", ["red", "blue", "green", "purple"], "red"),
+    ])
+    survey("Linux - Manage a Service", "Service", [
+        choice("Service", "service_name", ["web server", "SSH", "time sync", "firewall"], "web server"),
+        choice("Action", "service_action", ["status", "restarted", "started", "stopped"], "status"),
+    ])
+
+    # From nothing to a configured, deployed fleet in one run.
+    wf, _ = ensure(f"{C}/workflow_job_templates/", "Linux - Build Server Fleet", {
+        "organization": org_id,
+        "description": "Provision/start servers, packages, users, baseline, RHEL System Roles, web app, report",
+    })
+    nodes_path = f"{C}/workflow_job_templates/{wf['id']}/workflow_nodes/"
+    if not api("GET", nodes_path)["count"]:
+        chain = ["Linux - Provision / Start Servers", "Linux - Install Packages", "Linux - Manage Users",
+                 "Linux - Apply Config Baseline", "Linux - RHEL System Roles (time sync + SELinux)",
+                 "Linux - Deploy Web App", "Linux - Server Inventory Report"]
+        ids = [api("POST", nodes_path, {"unified_job_template": jts[name]["id"],
+                                         "identifier": name.split(" - ", 1)[1]})["id"] for name in chain]
+        for parent, child in zip(ids, ids[1:]):
+            api("POST", f"{C}/workflow_job_template_nodes/{parent}/success_nodes/", {"id": child})
+        print("  + workflow nodes")
     return inv, jts
 
 

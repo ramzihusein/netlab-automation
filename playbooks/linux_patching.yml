@@ -1,0 +1,132 @@
+---
+# Job Template: Linux - Patch Servers
+# Purpose: Patching, one server at a time so a service never loses every
+#          server at once: report what's pending, apply security or all
+#          updates, reboot only if the update needs it, check the server's
+#          services came back.
+#
+# Survey:
+#   patch_scope    report = list what's pending, change nothing
+#                  security = security updates only;  all = every update
+#   reboot_policy  if_needed = reboot when the kernel or core libraries changed
+#                  never = leave it for a maintenance window
+#
+# Required AAP Credentials: "EC2" (SSH key)
+
+- name: Patch servers
+  hosts: all
+  become: true
+  serial: 1                    # rolling: one server at a time
+  max_fail_percentage: 0       # stop the rollout at the first failure
+
+  vars:
+    patch_scope: report
+    reboot_policy: if_needed
+
+  tasks:
+
+    # --- What's pending -----------------------------------------------------
+
+    - name: Refresh the package lists (Ubuntu)
+      ansible.builtin.apt:
+        update_cache: true
+      when: ansible_os_family == 'Debian'
+      changed_when: false
+
+    - name: Pending updates (RHEL)
+      ansible.builtin.shell: |
+        echo "all: $(dnf -q check-update | grep -c '^[[:alnum:]]')"
+        echo "security: $(dnf -q updateinfo list --security | wc -l)"
+      register: pending_rhel
+      changed_when: false
+      when: ansible_os_family == 'RedHat'
+
+    - name: Pending updates (Ubuntu)
+      ansible.builtin.shell: |
+        echo "all: $(apt list --upgradable 2>/dev/null | grep -c upgradable)"
+        echo "security: $(apt list --upgradable 2>/dev/null | grep -c -- -security)"
+      register: pending_ubuntu
+      changed_when: false
+      when: ansible_os_family == 'Debian'
+
+    - name: Pending before patching
+      ansible.builtin.debug:
+        msg: "{{ (pending_rhel.stdout_lines | default(pending_ubuntu.stdout_lines)) | default([]) }}"
+
+    # --- Apply --------------------------------------------------------------
+
+    - name: Apply {{ patch_scope }} updates (RHEL)
+      ansible.builtin.dnf:
+        name: "*"
+        state: latest
+        security: "{{ patch_scope == 'security' }}"
+      register: patched_rhel
+      when:
+        - patch_scope != 'report'
+        - ansible_os_family == 'RedHat'
+
+    - name: Apply all updates (Ubuntu)
+      ansible.builtin.apt:
+        upgrade: dist
+      register: patched_ubuntu
+      when:
+        - patch_scope == 'all'
+        - ansible_os_family == 'Debian'
+
+    # Ubuntu's own tool for security-only updates (what it runs nightly).
+    - name: Apply security updates (Ubuntu)
+      ansible.builtin.command: unattended-upgrade -v
+      register: patched_ubuntu_security
+      changed_when: "'Packages that will be upgraded' in patched_ubuntu_security.stdout"
+      when:
+        - patch_scope == 'security'
+        - ansible_os_family == 'Debian'
+
+    # --- Reboot if the update needs it ---------------------------------------
+
+    - name: Does it need a reboot? (RHEL)
+      ansible.builtin.command: dnf needs-restarting -r
+      register: needs_reboot_rhel
+      failed_when: needs_reboot_rhel.rc not in [0, 1]
+      changed_when: false
+      when: ansible_os_family == 'RedHat'
+
+    - name: Does it need a reboot? (Ubuntu)
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: needs_reboot_ubuntu
+      when: ansible_os_family == 'Debian'
+
+    - name: Reboot
+      ansible.builtin.reboot:
+        msg: Rebooting after patching by Ansible Automation Platform
+        reboot_timeout: 600
+      when:
+        - patch_scope != 'report'
+        - reboot_policy == 'if_needed'
+        - (needs_reboot_rhel.rc | default(0)) == 1 or (needs_reboot_ubuntu.stat.exists | default(false))
+      register: rebooted
+
+    # --- Check it came back ---------------------------------------------------
+
+    - name: Read the services
+      ansible.builtin.service_facts:
+
+    - name: The web server is running again (web servers)
+      ansible.builtin.assert:
+        that: ansible_facts.services['nginx.service'].state == 'running'
+        fail_msg: nginx is not running after patching; rollout stopped
+      when: "'nginx.service' in ansible_facts.services"
+
+    - name: Running kernel
+      ansible.builtin.command: uname -r
+      register: kernel
+      changed_when: false
+
+    - name: Result
+      ansible.builtin.debug:
+        msg:
+          - "Scope: {{ patch_scope }}"
+          - "Updated: {{ (patched_rhel is changed) or (patched_ubuntu is changed) or (patched_ubuntu_security is changed) }}"
+          - "Rebooted: {{ rebooted is changed }}"
+          - "Kernel: {{ kernel.stdout }}"

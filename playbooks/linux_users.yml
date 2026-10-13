@@ -1,0 +1,61 @@
+---
+# Job Template: Linux - Manage Users
+# Purpose: Accounts, groups, SSH keys and sudo rights on every server, from
+#          vars/linux/users.yml. Onboarding and offboarding are a one-line
+#          change in that file.
+#
+# Required AAP Credentials: "EC2" (SSH key)
+
+- name: Manage users and access
+  hosts: all
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../vars/linux/users.yml
+
+  tasks:
+
+    - name: Groups
+      ansible.builtin.group:
+        name: "{{ item }}"
+        state: present
+      loop: "{{ user_groups }}"
+
+    - name: Passwordless sudo for {{ sudo_groups | join(', ') }}
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/{{ item }}
+        content: "%{{ item }} ALL=(ALL) NOPASSWD: ALL\n"
+        mode: "0440"
+        validate: visudo -cf %s      # a broken sudoers file never lands
+      loop: "{{ sudo_groups }}"
+
+    - name: Accounts
+      ansible.builtin.user:
+        name: "{{ item.name }}"
+        comment: "{{ item.comment }}"
+        groups: "{{ item.groups }}"
+        shell: /bin/bash
+        state: "{{ item.state }}"
+        remove: true                 # offboarding also removes the home directory
+      loop: "{{ users }}"
+      loop_control:
+        label: "{{ item.name }} ({{ item.state }})"
+
+    - name: SSH keys
+      ansible.posix.authorized_key:
+        user: "{{ item.name }}"
+        key: "{{ item.ssh_key }}"
+        exclusive: true              # only this key, whatever else was added
+      loop: "{{ users | selectattr('state', 'equalto', 'present') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Who has sudo now
+      ansible.builtin.command: getent group {{ sudo_groups | join(' ') }}
+      register: sudoers
+      changed_when: false
+
+    - name: Show it
+      ansible.builtin.debug:
+        msg: "{{ sudoers.stdout_lines }}"

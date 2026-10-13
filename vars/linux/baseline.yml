@@ -1,0 +1,25 @@
+---
+# The configuration baseline every server must meet, as data.
+# Used by playbooks/linux_baseline.yml (Linux - Apply Config Baseline and
+# Linux - Check Baseline Drift).
+
+timezone: America/New_York
+
+# SSH hardening, written to /etc/ssh/sshd_config.d/10-baseline.conf
+sshd_settings:
+  PermitRootLogin: "no"
+  PasswordAuthentication: "no"
+  X11Forwarding: "no"
+  MaxAuthTries: 3
+  ClientAliveInterval: 300
+  ClientAliveCountMax: 2
+
+# Kernel settings, written to /etc/sysctl.d/90-baseline.conf
+sysctl_settings:
+  vm.swappiness: 10
+  net.ipv4.conf.all.accept_redirects: 0
+  net.ipv4.conf.all.send_redirects: 0
+  net.ipv4.conf.all.log_martians: 1
+
+# Login message
+motd_contact: "#network-ops on Slack"

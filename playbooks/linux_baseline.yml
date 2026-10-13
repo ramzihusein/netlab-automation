@@ -1,0 +1,107 @@
+---
+# Job Templates: Linux - Apply Config Baseline   (job type: run)
+#                Linux - Check Baseline Drift    (same playbook, check + diff mode)
+#
+# Purpose: Configuration management. Every server must match the baseline in
+#          vars/linux/baseline.yml: time zone, SSH hardening, kernel settings,
+#          host firewall, login message. Run it again and nothing changes;
+#          edit a file by hand and the drift job shows the exact difference.
+#
+# Required AAP Credentials: "EC2" (SSH key)
+
+- name: Apply the configuration baseline
+  hosts: all
+  become: true
+
+  vars_files:
+    - ../vars/linux/baseline.yml
+
+  vars:
+    ssh_service: "{{ 'ssh' if ansible_os_family == 'Debian' else 'sshd' }}"
+
+  tasks:
+
+    - name: Time zone
+      community.general.timezone:
+        name: "{{ timezone }}"
+
+    - name: Login message (/etc/motd)
+      ansible.builtin.template:
+        src: linux/motd.j2           # playbooks/templates/linux/motd.j2
+        dest: /etc/motd
+        mode: "0644"
+
+    # --- SSH hardening ----------------------------------------------------
+
+    - name: sshd needs its runtime directory to test a config (Ubuntu starts sshd on demand)
+      ansible.builtin.file:
+        path: /run/sshd
+        state: directory
+        mode: "0755"
+      when: ansible_os_family == 'Debian'
+      check_mode: false
+
+    - name: SSH hardening (/etc/ssh/sshd_config.d/10-baseline.conf)
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/10-baseline.conf
+        content: |
+          # Managed by Ansible Automation Platform (vars/linux/baseline.yml)
+          {% for key, value in sshd_settings.items() %}
+          {{ key }} {{ value }}
+          {% endfor %}
+        mode: "0600"
+        validate: /usr/sbin/sshd -t -f %s     # a broken SSH config never lands
+      notify: Restart SSH
+
+    # --- Kernel settings --------------------------------------------------
+
+    - name: Kernel settings (/etc/sysctl.d/90-baseline.conf)
+      ansible.posix.sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        sysctl_file: /etc/sysctl.d/90-baseline.conf
+        sysctl_set: true
+      loop: "{{ sysctl_settings | dict2items }}"
+      loop_control:
+        label: "{{ item.key }} = {{ item.value }}"
+
+    # --- Host firewall: firewalld on RHEL, ufw on Ubuntu -------------------
+
+    - name: Firewall installed (RHEL)
+      ansible.builtin.dnf:
+        name: firewalld
+        state: present
+      when: ansible_os_family == 'RedHat'
+
+    - name: Firewall running (RHEL)
+      ansible.builtin.service:
+        name: firewalld
+        state: started
+        enabled: true
+      when: ansible_os_family == 'RedHat'
+
+    - name: Allow SSH (RHEL)
+      ansible.posix.firewalld:
+        service: ssh
+        permanent: true
+        immediate: true
+        state: enabled
+      when: ansible_os_family == 'RedHat'
+
+    - name: Allow SSH (Ubuntu), before the firewall is switched on
+      community.general.ufw:
+        rule: allow
+        name: OpenSSH
+      when: ansible_os_family == 'Debian'
+
+    - name: Firewall on, everything else denied (Ubuntu)
+      community.general.ufw:
+        state: enabled
+        policy: deny
+      when: ansible_os_family == 'Debian'
+
+  handlers:
+    - name: Restart SSH
+      ansible.builtin.service:
+        name: "{{ ssh_service }}"
+        state: restarted

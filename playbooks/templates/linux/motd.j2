@@ -1,0 +1,6 @@
+
+  {{ inventory_hostname }}  |  {{ ansible_distribution }} {{ ansible_distribution_version }}  |  role: {{ group_names | select('in', ['web', 'db']) | join(', ') }}
+
+  This server is managed by Red Hat Ansible Automation Platform.
+  Manual changes will be overwritten. Questions: {{ motd_contact }}
+

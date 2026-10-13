@@ -1,0 +1,22 @@
+---
+# Software every server should have, as data.
+# Used by playbooks/linux_packages.yml (Linux - Install Packages).
+
+# Same name on RHEL and Ubuntu.
+common_packages:
+  - git
+  - curl
+  - jq
+  - tmux
+  - unzip
+  - lsof
+
+# Names that differ between the two families (ansible_os_family).
+family_packages:
+  RedHat: [vim-enhanced, bind-utils]
+  Debian: [vim, dnsutils]
+
+# Extra software by server role (inventory group).
+role_packages:
+  web: [nginx]
+  db: [postgresql-server]      # db1 is RHEL

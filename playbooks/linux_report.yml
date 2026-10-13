@@ -1,0 +1,37 @@
+---
+# Job Template: Linux - Server Inventory Report
+# Purpose: What do we actually have? Ansible's facts give OS, kernel,
+#          uptime, size and disk use for every server in one run, without
+#          logging in to anything. Changes nothing.
+#
+# Required AAP Credentials: "EC2" (SSH key)
+
+- name: Server inventory report
+  hosts: all
+  become: true
+
+  tasks:
+
+    - name: Server summary
+      ansible.builtin.debug:
+        msg:
+          - "OS:        {{ ansible_distribution }} {{ ansible_distribution_version }} ({{ ansible_os_family }})"
+          - "Kernel:    {{ ansible_kernel }}"
+          - "Up:        {{ (ansible_uptime_seconds / 86400) | round(1) }} days"
+          - "Size:      {{ ansible_processor_vcpus }} vCPU, {{ (ansible_memtotal_mb / 1024) | round(1) }} GB RAM"
+          - "Root disk: {{ root_used_pct }}% used of {{ (root.size_total / 1024**3) | round(1) }} GB"
+          - "Address:   {{ ansible_default_ipv4.address }}"
+          - "SELinux:   {{ ansible_selinux.status | default('n/a') }} {{ ansible_selinux.mode | default('') }}"
+          - "Groups:    {{ group_names | join(', ') }}"
+      vars:
+        root: "{{ ansible_mounts | selectattr('mount', 'equalto', '/') | first }}"
+        root_used_pct: "{{ (100 * (1 - root.size_available / root.size_total)) | round(0) | int }}"
+
+    - name: Warn about full disks (over 80%)
+      ansible.builtin.assert:
+        that: (100 * (1 - root.size_available / root.size_total)) < 80
+        fail_msg: "{{ inventory_hostname }}: root disk is over 80% full"
+        quiet: true
+      vars:
+        root: "{{ ansible_mounts | selectattr('mount', 'equalto', '/') | first }}"
+      ignore_errors: true

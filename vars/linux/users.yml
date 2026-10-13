@@ -1,0 +1,34 @@
+---
+# Who has access to the Linux servers, as data.
+# Used by playbooks/linux_users.yml (Linux - Manage Users).
+#
+# Onboarding = add an entry. Offboarding = set state: absent (the account and
+# its home directory are removed everywhere). Commit and run the job.
+# The SSH keys are demo keys; nobody holds the private halves.
+
+# Members of these groups get sudo without a password.
+sudo_groups:
+  - ops
+
+user_groups:
+  - ops
+  - developers
+
+users:
+  - name: alice
+    comment: Alice Ahmed (Operations)
+    groups: [ops]
+    ssh_key: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIP4W4LBZKkrfc81cHLNlcHXluR80xkHn55dZgDH9OsPj alice@example.com
+    state: present
+
+  - name: bob
+    comment: Bob Byrne (Development)
+    groups: [developers]
+    ssh_key: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINaeg4XLqBLKuvRj9Wf6Pj8E90gD4oG5pleCyavVZmTD bob@example.com
+    state: present
+
+  - name: carol
+    comment: Carol Chen (Contractor)
+    groups: [developers]
+    ssh_key: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMprWAK/NbX5pt8uPUPnanPvgUZeBiRnNLAv9t5qUeEm carol@example.com
+    state: present      # contract ended? change to absent

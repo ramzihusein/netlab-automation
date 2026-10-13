@@ -1,0 +1,48 @@
+---
+# Job Template: Linux - Manage a Service
+# Purpose: Self-service operations: restart (or stop/start/check) a service
+#          without anyone needing a shell on the server. Pair it with RBAC
+#          so a help desk can run this and nothing else.
+#
+# Survey: service_name (web server, SSH, time sync, firewall) and service_action
+#   restarted / started / stopped / status
+#
+# Required AAP Credentials: "EC2" (SSH key)
+
+- name: Manage a service
+  hosts: all
+  become: true
+
+  vars:
+    service_name: web server
+    service_action: status
+    # The same service has different unit names on RHEL and Ubuntu.
+    unit_names:
+      web server: {RedHat: nginx, Debian: nginx}
+      SSH: {RedHat: sshd, Debian: ssh}
+      time sync: {RedHat: chronyd, Debian: systemd-timesyncd}
+      firewall: {RedHat: firewalld, Debian: ufw}
+    unit: "{{ unit_names[service_name][ansible_os_family] }}"
+
+  tasks:
+
+    - name: Read the services
+      ansible.builtin.service_facts:
+
+    - name: "{{ service_action | capitalize }} {{ service_name }}"
+      ansible.builtin.service:
+        name: "{{ unit }}"
+        state: "{{ service_action }}"
+      when:
+        - service_action != 'status'
+        - (unit ~ '.service') in ansible_facts.services
+
+    - name: Current status
+      ansible.builtin.command: systemctl status {{ unit }} --no-pager --lines 5
+      register: status
+      changed_when: false
+      failed_when: false
+
+    - name: Show it
+      ansible.builtin.debug:
+        msg: "{{ status.stdout_lines if status.stdout else unit ~ ' is not installed on ' ~ inventory_hostname }}"

@@ -1,0 +1,25 @@
+---
+# Job Template: Linux - RHEL System Roles (time sync + SELinux)
+# Purpose: Red Hat certified content: RHEL System Roles ship with the
+#          supported execution environment and are tested and supported by
+#          Red Hat for every RHEL version. Two lines of data replace writing
+#          the chrony and SELinux tasks yourself.
+#
+# Required AAP Credentials: "EC2" (SSH key)
+
+- name: RHEL System Roles
+  hosts: rhel
+  become: true
+
+  vars:
+    # redhat.rhel_system_roles.timesync: Amazon's time service, on every EC2 instance
+    timesync_ntp_servers:
+      - hostname: 169.254.169.123
+        iburst: true
+    # redhat.rhel_system_roles.selinux
+    selinux_state: enforcing
+    selinux_policy: targeted
+
+  roles:
+    - redhat.rhel_system_roles.timesync
+    - redhat.rhel_system_roles.selinux

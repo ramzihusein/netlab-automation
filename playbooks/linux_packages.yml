@@ -1,0 +1,52 @@
+---
+# Job Template: Linux - Install Packages
+# Purpose: The software each server should have, from vars/linux/packages.yml:
+#          common packages, the names that differ between RHEL and Ubuntu,
+#          and extras per server role. One task covers both families: the
+#          package module uses dnf on RHEL and apt on Ubuntu.
+#
+# Survey: extra_packages (optional, comma separated) and package_state
+#   present = install if missing; latest = also update; absent = remove
+#
+# Required AAP Credentials: "EC2" (SSH key)
+
+- name: Install packages
+  hosts: all
+  become: true
+
+  vars_files:
+    - ../vars/linux/packages.yml
+
+  vars:
+    extra_packages: ""
+    package_state: present
+    wanted: >-
+      {{ common_packages
+         + family_packages[ansible_os_family]
+         + (group_names | map('extract', role_packages) | select('defined') | flatten) }}
+
+  tasks:
+
+    - name: Baseline packages ({{ ansible_os_family }}, {{ group_names | join(', ') }})
+      ansible.builtin.package:
+        name: "{{ wanted }}"
+        state: present
+
+    - name: Extra packages from the survey ({{ package_state }})
+      ansible.builtin.package:
+        name: "{{ extra_packages | split(',') | map('trim') | select | list }}"
+        state: "{{ package_state }}"
+      when: extra_packages | trim | length > 0
+
+    - name: Read the installed package versions
+      ansible.builtin.package_facts:
+
+    - name: Installed versions
+      ansible.builtin.debug:
+        msg: >-
+          {{ dict(names | zip(names | map('extract', ansible_facts.packages)
+                  | map('first') | map(attribute='version'))) }}
+      vars:
+        names: >-
+          {{ (wanted + (extra_packages | split(',') | map('trim') | select | list))
+             | select('in', ansible_facts.packages) | list }}
