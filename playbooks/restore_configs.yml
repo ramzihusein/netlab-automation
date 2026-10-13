@@ -44,19 +44,33 @@
       delegate_to: localhost
       run_once: true
 
+    # show running-config prints a banner's end marker as the two characters
+    # "^C"; a config file needs the real Ctrl-C character there.
+    - name: Prepare the backed-up config for the device
+      ansible.builtin.copy:
+        dest: "/tmp/netlab-restore-{{ inventory_hostname }}.cfg"
+        content: "{{ lookup('ansible.builtin.file', backup_dir ~ '/configs/' ~ inventory_hostname ~ '.cfg') | replace('^C', '\x03') }}\n"
+        mode: "0644"
+      delegate_to: localhost
+
     - name: Copy the backed-up config to the device
       ansible.netcommon.net_put:
-        src: "{{ backup_dir }}/configs/{{ inventory_hostname }}.cfg"
+        src: "/tmp/netlab-restore-{{ inventory_hostname }}.cfg"
         dest: "{{ restore_file[ansible_network_os] }}"
 
     - name: Replace the running config with the backup (Arista)
       arista.eos.eos_command:
         commands: configure replace flash:netlab-restore.cfg
+      changed_when: true
       when: ansible_network_os == 'arista.eos.eos'
 
     - name: Replace the running config with the backup (Cisco)
       cisco.ios.ios_command:
         commands: configure replace bootflash:netlab-restore.cfg force
+      register: ios_replace
+      changed_when: true
+      # IOS reports a replace it couldn't finish in the output, not as an error.
+      failed_when: ios_replace.stdout[0] is search('aborted|failed to apply', ignorecase=true)
       when: ansible_network_os == 'cisco.ios.ios'
 
     - name: Save the restored config
