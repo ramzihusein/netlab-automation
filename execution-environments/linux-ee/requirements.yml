@@ -1,0 +1,10 @@
+---
+# Collections added on top of the supported EE. Version ranges stay on
+# releases that support the base image's ansible-core 2.16.
+collections:
+  - name: community.general
+    version: ">=10.0.0,<11.0.0"
+  - name: community.crypto
+    version: ">=2.0.0,<3.0.0"
+  - name: containers.podman
+    version: ">=1.15.0,<2.0.0"

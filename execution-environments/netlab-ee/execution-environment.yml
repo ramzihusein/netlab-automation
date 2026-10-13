@@ -9,7 +9,7 @@
 # the build needs no registry.redhat.io login. Built and pushed back to the
 # hub by playbooks/09_build_ee.yml (job "NetLab - Build Execution Environment"):
 #
-#   ansible-builder build -f ee/execution-environment.yml -t <hub>/netlab-ee:<tag>
+#   ansible-builder build -f execution-environments/netlab-ee/execution-environment.yml -t <hub>/netlab-ee:<tag>
 
 version: 3
 

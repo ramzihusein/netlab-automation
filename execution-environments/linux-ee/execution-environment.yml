@@ -1,0 +1,39 @@
+---
+# Linux / infrastructure execution environment (ansible-builder v3 schema).
+#
+# The supported AAP 2.6 EE already has the Red Hat certified content these
+# demos lean on: ansible.posix, redhat.rhel_system_roles, amazon.aws. On top:
+#   - community.general   ufw, timezone, and many other everyday modules
+#   - community.crypto    certificates and keys
+#   - containers.podman   running containers on the servers
+#
+# Built and pushed to the private automation hub by playbooks/09_build_ee.yml
+# (job "NetLab - Build Execution Environment", survey: linux-ee):
+#
+#   ansible-builder build -f execution-environments/linux-ee/execution-environment.yml -t <hub>/linux-ee:<tag>
+
+version: 3
+
+images:
+  base_image:
+    name: gateway.aap.ramzidev.com/ee-supported-rhel9:latest   # AAP itself pulls the result as ip-10-0-1-147.us-east-2.compute.internal/linux-ee
+
+dependencies:
+  # ansible-core and ansible-runner are left out on purpose: the supported
+  # base image already has the versions Red Hat supports.
+  galaxy: requirements.yml
+  # Pre-built in the base image; builder would otherwise try to recompile it.
+  exclude:
+    python:
+      - systemd-python
+
+options:
+  # The RHEL 9 based AAP EEs ship microdnf, not dnf.
+  package_manager_path: /usr/bin/microdnf
+  tags:
+    - linux-ee:latest
+
+additional_build_steps:
+  append_final:
+    - LABEL org.opencontainers.image.source="https://github.com/ramzihusein/netlab-automation"
+    - LABEL org.opencontainers.image.description="AAP 2.6 supported EE + community.general, community.crypto, containers.podman"

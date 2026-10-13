@@ -86,7 +86,8 @@ Created by `bootstrap/aap_bootstrap.py` (idempotent):
 | Credential | NetLab EDA Event Stream | event stream URL + token for the NetBox webhook |
 | Credential type | Container Registry Login | `ee_registry*` vars (build job) |
 | Credential | NetLab Hub Registry / NetLab Hub Push | automation hub login (AAP admin); type the password in the AAP UI once |
-| Execution environment | NetLab EE | `ee/execution-environment.yml`, used by Populate NetBox |
+| Execution environment | NetLab EE | `execution-environments/netlab-ee/`, used by Populate NetBox and the restore |
+| Execution environment | Linux EE | `execution-environments/linux-ee/`, used by the Linux jobs |
 | Inventory | NetLab Infra | `aws_ec2`, tag `Project=netlab`, groups `role_labhost`, `role_netbox` |
 | Inventory | NetLab Devices | NetBox (`inventories/netbox.yml`), update on launch |
 | Workflow | NetLab - Start (build if needed) | 01 → (02 → 03, 04) → 05 → 06 → 07 |
@@ -112,26 +113,35 @@ AAP_URL=https://gateway.aap.ramzidev.com AAP_TOKEN=<token> \
 | 09 | Build Execution Environment | ansible-builder v3 on the lab host → push `netlab-ee` to the automation hub |
 | 99 | Teardown | route, DNS, instances, SGs (images kept unless asked) |
 
-## Execution environment (`ee/`)
+## Execution environments (`execution-environments/`)
 
-`ee/execution-environment.yml` is an **ansible-builder v3** definition
-(`version: 3`): the supported AAP 2.6 EE (`ee-supported-rhel9`, pulled from
-the automation hub that ships with AAP, so no registry.redhat.io login is
-needed) plus the `netbox.netbox` collection and `pynetbox`. Only Populate
-NetBox needs it; everything else stays on the default EE.
+One private automation hub, one EE per use case. Each is an
+**ansible-builder v3** definition (`version: 3`) on top of the supported AAP
+2.6 EE (`ee-supported-rhel9`, pulled from the hub that ships with AAP, so no
+registry.redhat.io login is needed):
 
-To change it, edit the files in `ee/`, push, and run **NetLab - Build
-Execution Environment**. It builds on the lab host, checks the collection and
-pynetbox are in the image, and pushes `netlab-ee:latest` plus a dated tag
-(e.g. `netlab-ee:20261013-0201`) for rollback. AAP pulls it as
-`ip-10-0-1-147.us-east-2.compute.internal/netlab-ee` (the gateway's
-certificate is issued for node names, which the execution nodes trust).
+| EE | Definition | Adds | Used by |
+|---|---|---|---|
+| NetLab EE | `execution-environments/netlab-ee/` | `netbox.netbox`, `pynetbox` | Populate NetBox, Restore Configs, VLAN request |
+| Linux EE | `execution-environments/linux-ee/` | `community.general`, `community.crypto`, `containers.podman` | Linux jobs |
+
+The base image already has the certified collections: `ansible.posix`,
+`redhat.rhel_system_roles`, `amazon.aws`, `ansible.netcommon`, and others.
+
+To change an EE, edit its folder, push, and run **NetLab - Build Execution
+Environment** (survey: which EE).
+- It builds on the lab host, checks every added collection is in the image,
+  and pushes `<name>:latest` plus a dated tag (e.g. `netlab-ee:20261013-0201`)
+  for rollback.
+- AAP pulls the images as `ip-10-0-1-147.us-east-2.compute.internal/<name>`,
+  because the gateway's certificate is issued for node names, which the
+  execution nodes trust.
 
 Build by hand (anywhere with podman):
 
 ```bash
 pip install 'ansible-builder>=3.1,<4'
-cd ee && ansible-builder build -t netlab-ee:latest --extra-build-cli-args=--tls-verify=false
+cd execution-environments/linux-ee && ansible-builder build -t linux-ee:latest --extra-build-cli-args=--tls-verify=false
 ```
 
 ## Demo: NetBox drives the network

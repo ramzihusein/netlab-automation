@@ -28,7 +28,8 @@ REPO_URL = "https://github.com/ramzihusein/netlab-automation.git"
 BRANCH = "main"
 ORG = "Default"
 EE = "Default execution environment"
-NETLAB_EE = "NetLab EE"            # built from ee/execution-environment.yml
+NETLAB_EE = "NetLab EE"            # built from execution-environments/netlab-ee/
+LINUX_EE = "Linux EE"              # built from execution-environments/linux-ee/
 BACKUP_REPO = "ramzihusein/netlab-backups"   # private: running configs hold secrets
 G = "/api/gateway/v1"
 HUB_REGISTRY = "gateway.aap.ramzidev.com"   # push (from the lab host, TLS verify off)
@@ -246,7 +247,14 @@ def hub_registry(org_id, login_ct):
     ee, _ = ensure(f"{C}/execution_environments/", NETLAB_EE, {
         "organization": org_id, "image": f"{HUB_PULL_REGISTRY}/netlab-ee:latest", "pull": "always",
         "credential": pull["id"],
-        "description": "Supported EE + netbox.netbox and pynetbox (ee/execution-environment.yml)",
+        "description": "Supported EE + netbox.netbox and pynetbox (execution-environments/netlab-ee)",
+    })
+    # Same hub, same pull credential: one EE per use case.
+    ensure(f"{C}/execution_environments/", LINUX_EE, {
+        "organization": org_id, "image": f"{HUB_PULL_REGISTRY}/linux-ee:latest", "pull": "always",
+        "credential": pull["id"],
+        "description": "Supported EE + community.general, community.crypto, containers.podman "
+                       "(execution-environments/linux-ee)",
     })
     return push, ee
 
@@ -424,7 +432,8 @@ def job_templates(org_id, proj, ee_id, netlab_ee_id, inv, creds):
          {"ask_limit_on_launch": True, "ask_variables_on_launch": True}),
         ("NetLab - Configure NetBox Webhook", "playbooks/07_configure_netbox_webhook.yml", "infra",
          ["ssh", "netbox", "stream", "ingest"], {"survey_enabled": True}),
-        ("NetLab - Build Execution Environment", "playbooks/09_build_ee.yml", "infra", ["ssh", "hub_push"], {}),
+        ("NetLab - Build Execution Environment", "playbooks/09_build_ee.yml", "infra", ["ssh", "hub_push"],
+         {"survey_enabled": True}),
         ("NetLab - Configure Syslog Forwarder", "playbooks/10_configure_syslog_forwarder.yml", "infra",
          ["ssh", "syslog_stream"], {}),
         # Day-2 operations
@@ -523,6 +532,16 @@ def job_templates(org_id, proj, ee_id, netlab_ee_id, inv, creds):
              "default": "Change window tonight 22:00-23:00. Contact the network team before making changes.",
              "required": True, "min": 1, "max": 1000},
         ],
+    })
+    api("POST", f"{C}/job_templates/{jts['NetLab - Build Execution Environment']['id']}/survey_spec/", {
+        "name": "Execution environment", "description": "",
+        "spec": [{
+            "question_name": "Which execution environment?",
+            "question_description": "netlab-ee = NetBox content; linux-ee = Linux / infrastructure content. "
+                                    "Definitions: execution-environments/<name>/ in the project",
+            "variable": "ee_name", "type": "multiplechoice", "choices": ["netlab-ee", "linux-ee"],
+            "default": "netlab-ee", "required": True,
+        }],
     })
     ensure(f"{C}/schedules/", "NetLab - Backup Configs before shutdown", {
         "unified_job_template": jts["NetLab - Backup Configs"]["id"],

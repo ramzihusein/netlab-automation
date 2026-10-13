@@ -1,8 +1,11 @@
 ---
 # Job Template: NetLab - Build Execution Environment
-# Purpose: Builds the NetLab EE from ee/execution-environment.yml with
+# Purpose: Builds an execution environment from
+#          execution-environments/<ee_name>/execution-environment.yml with
 #          ansible-builder v3 on the lab host, and pushes it to the private
 #          automation hub that AAP pulls execution environments from.
+#          Survey "ee_name": netlab-ee (NetBox content) or linux-ee (Linux /
+#          infrastructure content).
 #
 # Required AAP Credential: "NetLab Hub Registry" type, which injects
 #   ee_registry, ee_registry_username, ee_registry_password
@@ -13,9 +16,14 @@
   gather_facts: false
 
   vars:
+    ee_name: netlab-ee
     builder_dir: /opt/ansible-builder
-    build_dir: /opt/netlab/ee
-    ee_image: "{{ ee_registry }}/netlab-ee"
+    build_dir: /opt/netlab/ee/{{ ee_name }}
+    ee_image: "{{ ee_registry }}/{{ ee_name }}"
+    # Every collection the definition adds, to check it made it into the image.
+    ee_collections: >-
+      {{ (lookup('ansible.builtin.file', '../execution-environments/' ~ ee_name ~ '/requirements.yml')
+          | from_yaml).collections | map(attribute='name') | list }}
 
   tasks:
 
@@ -35,9 +43,9 @@
         virtualenv: "{{ builder_dir }}"
         virtualenv_command: python3 -m venv
 
-    - name: Copy the EE definition from the project
+    - name: Copy the {{ ee_name }} definition from the project
       ansible.builtin.copy:
-        src: ../ee/
+        src: ../execution-environments/{{ ee_name }}/
         dest: "{{ build_dir }}/"
         mode: "0644"
 
@@ -64,10 +72,10 @@
         chdir: "{{ build_dir }}"
       changed_when: true
 
-    - name: Check the collection and pynetbox are in the image
+    - name: Check the added collections are in the image
       ansible.builtin.command: >-
         podman run --rm {{ ee_image }}:latest
-        bash -c "ansible-galaxy collection list netbox.netbox && python3 -c 'import pynetbox; print(\"pynetbox\", pynetbox.__version__)'"
+        bash -c "{{ ee_collections | map('regex_replace', '^', 'ansible-galaxy collection list ') | join(' && ') }}"
       register: ee_check
       changed_when: false
 
