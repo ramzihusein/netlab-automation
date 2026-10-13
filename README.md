@@ -298,18 +298,22 @@ modules**:
 | NetLab Intro 1 - Read Device Config as Data | `intro_1_read_config.yml` | `state: gathered`: device config returned as structured data, the same shape for both vendors. Changes nothing. |
 | NetLab Intro 2 - Configure VLANs | `intro_2_configure_vlans.yml` + `vars/intro/vlans.yml` | Adds VLANs 100/110/120 on eos-leaf1. A survey picks `merged` / `replaced` / `overridden` / `deleted`. Prints the commands Ansible worked out. Run it twice: the second run changes nothing. |
 | NetLab Intro 3 - Configure Interface Descriptions | `intro_3_configure_interfaces.yml` + `vars/intro/interfaces.yml` | The same data on Arista and Cisco, with two modules. Survey: `merged` / `replaced`. |
+| NetLab Intro 4 - Configure Banner | `intro_4_configure_banner.yml` | No data file: a survey picks `login` or `motd` and takes the message. One input for both vendors; the output shows Arista's `EOF` against Cisco's `@` delimiters. |
 | NetLab - Check Drift and Remediate (workflow) | — | Drift report (with the commands that would fix it) → approval → Configure Devices → drift check again ("In sync with NetBox"). |
 
 These jobs run from AAP, so self-heal ignores the changes. They stay on the
 devices until you remediate. The workflow then shows NetBox as the source of
 truth and resets the lab in one go.
 
+NetBox owns both banners. The login banner comes from config context key `banner`. The MOTD comes from `motd`: it's set if the key exists and removed if it doesn't. Add `motd` to the "NetLab - Global services" context to show NetBox setting it on every device.
+
 Suggested order:
 1. Intro 1.
 2. Edit `vars/intro/vlans.yml` in GitHub, run Intro 2, then run it again (nothing changes).
 3. Intro 3.
-4. Check Drift and Remediate.
-5. Now introduce NetBox: the same idea, with the data in a source of truth instead of files.
+4. Intro 4, typing a message live.
+5. Check Drift and Remediate.
+6. Now introduce NetBox: the same idea, with the data in a source of truth instead of files.
 
 ## Demo scripts
 
