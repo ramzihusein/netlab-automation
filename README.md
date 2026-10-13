@@ -314,3 +314,32 @@ on all devices; bindings are enforced on the Cisco c8000v leaves.
 
 **Onboarding a device**: rebuild the lab (or a device) with no config, then run
 **NetLab - Configure Devices**: everything above is rendered from NetBox.
+
+## Day-2 operations
+
+**Backups** (`backup_configs.yml`, job **NetLab - Backup Configs**, also
+scheduled weekdays 18:45 ET before the lab stops): every device's running
+config is committed to the private repo `ramzihusein/netlab-backups`
+(`configs/<device>.cfg`), so the commit history is a timeline of the network.
+**NetLab - Restore Configs** puts devices back to the latest backup or any
+commit (survey: `backup_ref`) with `configure replace`, which also removes
+lines added since.
+
+**Self-healing** (`rulebooks/device_syslog.yml`, activation **NetLab
+Self-Heal**): devices send syslog to the lab host (NetBox config context
+`syslog_hosts`), where `scripts/syslog_to_eda.py` forwards config-change
+messages (`%SYS-5-CONFIG_I`) to the EDA event stream **NetLab Device Syslog**.
+A change made by a person (not from an AAP execution node) runs **NetLab -
+Self-Heal Device** for that device, 20 s after the last change, in diff mode
+so the job shows what was put back.
+
+**Request Server VLAN** (workflow, survey): backup → **Validate Fabric**
+(pre-check) → **approval** → add the VLAN to NetBox (as user `aap`, so EDA
+leaves it to the workflow) → **Configure Devices** → post-check (BGP up,
+loopbacks reachable, spines route the new subnet) → on failure, **Restore
+Configs** and a journal entry on the VLAN in NetBox. Answer "Simulate a bad
+change" = yes to see the restore.
+
+**RBAC**: team **Network Ops** (user `netops`) can run Check Config Drift,
+Backup Configs, Validate Fabric and Request Server VLAN, and use the device
+inventory; nothing else.
