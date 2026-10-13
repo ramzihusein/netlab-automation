@@ -23,6 +23,12 @@
 
   tasks:
 
+    - name: Create the forwarder directory
+      ansible.builtin.file:
+        path: "{{ forwarder_dir }}"
+        state: directory
+        mode: "0755"
+
     - name: Install the forwarder script
       ansible.builtin.copy:
         src: ../scripts/syslog_to_eda.py
