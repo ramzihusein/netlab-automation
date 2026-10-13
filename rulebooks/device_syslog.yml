@@ -29,7 +29,7 @@
     # People often make several changes in a row: wait until it has been
     # quiet on that device for 20 seconds, then fix it once.
     - name: Change made by hand
-      condition: event.payload.message is search("CONFIG_I", ignorecase=true)
+      condition: event.payload.message is search("SYS-5-CONFIG", ignorecase=true)
       throttle:
         once_after: 20 seconds
         group_by_attributes:

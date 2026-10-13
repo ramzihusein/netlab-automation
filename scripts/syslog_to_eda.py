@@ -3,7 +3,8 @@
 
 Runs on the lab host (the devices' management gateway). Listens for syslog on
 UDP, keeps only configuration-change messages (%SYS-5-CONFIG_I, sent by EOS
-and IOS when someone leaves config mode), and POSTs each one as JSON:
+and IOS when someone leaves config mode; on EOS also
+%SYS-5-CONFIG_SESSION_COMMIT_SUCCESS for config sessions), and POSTs each one as JSON:
 
   {"device": "eos-leaf1", "source_ip": "172.20.20.21",
    "message": "%SYS-5-CONFIG_I: Configured from console by admin on vty3 (172.20.20.1)"}
@@ -23,7 +24,7 @@ import ssl
 import sys
 import urllib.request
 
-CONFIG_CHANGE = re.compile(r"%SYS-5-CONFIG_I:.*")
+CONFIG_CHANGE = re.compile(r"%SYS-5-CONFIG_(I|SESSION_COMMIT_SUCCESS):.*")
 
 url = os.environ["EDA_URL"]
 headers = {"Content-Type": "application/json", os.environ.get("EDA_HEADER", "Authorization"): os.environ["EDA_TOKEN"]}
