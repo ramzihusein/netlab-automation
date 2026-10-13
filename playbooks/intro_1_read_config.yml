@@ -1,0 +1,54 @@
+---
+# Job Template: NetLab Intro 1 - Read Device Config as Data
+# Purpose: A first look at Ansible network resource modules. With
+#          state: gathered, a module READS one part of the device config and
+#          returns it as structured data, the same shape for every vendor.
+#          No screen scraping, no parsing. This job changes nothing.
+#
+# The data shown here has the same format the next two jobs use to WRITE
+# config (vars/intro/*.yml).
+#
+# Required AAP Credentials: "NetLab Devices"
+
+- name: Read device config as structured data
+  hosts: all
+  gather_facts: false
+
+  tasks:
+
+    # --- Interfaces: both vendors ------------------------------------------
+
+    - name: Read interfaces (Arista)
+      arista.eos.eos_interfaces:
+        state: gathered
+      register: arista_interfaces
+      when: ansible_network_os == 'arista.eos.eos'
+
+    - name: Show interfaces (Arista)
+      ansible.builtin.debug:
+        var: arista_interfaces.gathered
+      when: ansible_network_os == 'arista.eos.eos'
+
+    - name: Read interfaces (Cisco)
+      cisco.ios.ios_interfaces:
+        state: gathered
+      register: cisco_interfaces
+      when: ansible_network_os == 'cisco.ios.ios'
+
+    - name: Show interfaces (Cisco)
+      ansible.builtin.debug:
+        var: cisco_interfaces.gathered
+      when: ansible_network_os == 'cisco.ios.ios'
+
+    # --- VLANs: the Arista leaf is a switch (the Cisco devices are routers) --
+
+    - name: Read VLANs (Arista)
+      arista.eos.eos_vlans:
+        state: gathered
+      register: arista_vlans
+      when: ansible_network_os == 'arista.eos.eos'
+
+    - name: Show VLANs (Arista)
+      ansible.builtin.debug:
+        var: arista_vlans.gathered
+      when: ansible_network_os == 'arista.eos.eos'

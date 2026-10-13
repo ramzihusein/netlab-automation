@@ -444,6 +444,15 @@ def job_templates(org_id, proj, ee_id, netlab_ee_id, inv, creds):
          {"ask_variables_on_launch": True, "execution_environment": netlab_ee_id}),
         ("NetLab - Demo Fault Injection", "playbooks/demo_fault.yml", "devices", ["devices"],
          {"ask_variables_on_launch": True}),
+        # Getting started: config from plain variables files with resource
+        # modules, no NetBox. Run from AAP, so self-heal leaves the changes
+        # alone; "NetLab - Check Drift and Remediate" puts NetBox's config back.
+        ("NetLab Intro 1 - Read Device Config as Data", "playbooks/intro_1_read_config.yml", "devices",
+         ["devices"], {"ask_limit_on_launch": True}),
+        ("NetLab Intro 2 - Configure VLANs", "playbooks/intro_2_configure_vlans.yml", "devices",
+         ["devices"], {"diff_mode": True, "survey_enabled": True}),
+        ("NetLab Intro 3 - Configure Interface Descriptions", "playbooks/intro_3_configure_interfaces.yml",
+         "devices", ["devices"], {"diff_mode": True, "survey_enabled": True, "ask_limit_on_launch": True}),
         ("NetLab - Stop", "playbooks/08_stop_netlab.yml", "local", ["aws"],
          {"ask_variables_on_launch": True}),
         ("NetLab - Teardown", "playbooks/99_teardown.yml", "local", ["aws"],
@@ -477,6 +486,28 @@ def job_templates(org_id, proj, ee_id, netlab_ee_id, inv, creds):
             "question_name": "Backup to restore",
             "question_description": "main = the latest backup, or a commit ID from the backup repo history",
             "variable": "backup_ref", "type": "text", "default": "main", "required": False,
+        }],
+    })
+    api("POST", f"{C}/job_templates/{jts['NetLab Intro 2 - Configure VLANs']['id']}/survey_spec/", {
+        "name": "Resource module state", "description": "",
+        "spec": [{
+            "question_name": "How should the VLAN list be applied?",
+            "question_description": "merged = add/update the listed VLANs only; replaced = listed VLANs keep "
+                                    "only the settings in the file; overridden = the file is the full list, "
+                                    "every other VLAN is deleted (host1 loses VLAN 10); deleted = remove "
+                                    "the listed VLANs",
+            "variable": "vlan_state", "type": "multiplechoice",
+            "choices": ["merged", "replaced", "overridden", "deleted"], "default": "merged", "required": True,
+        }],
+    })
+    api("POST", f"{C}/job_templates/{jts['NetLab Intro 3 - Configure Interface Descriptions']['id']}/survey_spec/", {
+        "name": "Resource module state", "description": "",
+        "spec": [{
+            "question_name": "How should the interface data be applied?",
+            "question_description": "merged = set the listed descriptions only; replaced = listed interfaces "
+                                    "keep only the settings in the file",
+            "variable": "interface_state", "type": "multiplechoice",
+            "choices": ["merged", "replaced"], "default": "merged", "required": True,
         }],
     })
     ensure(f"{C}/schedules/", "NetLab - Backup Configs before shutdown", {
@@ -598,6 +629,42 @@ def vlan_workflow(org_id, jts):
              ("push", "failure", "restore"), ("postcheck", "failure", "restore")]
     for parent, kind, child in links:
         api("POST", f"{C}/workflow_job_template_nodes/{n[parent]}/{kind}_nodes/", {"id": n[child]})
+    print("  + workflow nodes")
+    return wf
+
+
+def remediate_workflow(org_id, jts):
+    """Show the drift, approve, put NetBox's config back, prove it's in sync.
+    Also the quick way to reset the lab after a demo."""
+    print("Workflow: Check Drift and Remediate")
+    wf, _ = ensure(f"{C}/workflow_job_templates/", "NetLab - Check Drift and Remediate", {
+        "organization": org_id,
+        "description": "Report drift from NetBox, approve, make the network match NetBox again, "
+                       "then check again",
+    })
+    nodes_path = f"{C}/workflow_job_templates/{wf['id']}/workflow_nodes/"
+    if api("GET", nodes_path)["count"]:
+        print("  = workflow nodes exist")
+        return wf
+
+    def node(ident, jt=None):
+        body = {"identifier": ident}
+        if jt:
+            body["unified_job_template"] = jts[jt]["id"]
+        return api("POST", nodes_path, body)["id"]
+
+    n = {
+        "drift": node("drift", "NetLab - Check Config Drift"),
+        "approval": node("approval"),
+        "remediate": node("remediate", "NetLab - Configure Devices"),
+        "recheck": node("recheck", "NetLab - Check Config Drift"),
+    }
+    api("POST", f"{C}/workflow_job_template_nodes/{n['approval']}/create_approval_template/", {
+        "name": "Put the network back to NetBox?", "timeout": 3600,
+        "description": "The drift report shows what differs from NetBox. Approve to overwrite it.",
+    })
+    for parent, child in [("drift", "approval"), ("approval", "remediate"), ("remediate", "recheck")]:
+        api("POST", f"{C}/workflow_job_template_nodes/{n[parent]}/success_nodes/", {"id": n[child]})
     print("  + workflow nodes")
     return wf
 
@@ -819,6 +886,7 @@ def main():
     jts = job_templates(org_id, proj, find(f"{C}/execution_environments/", EE)["id"], netlab_ee["id"], inv, creds)
     wf = workflow(org_id, jts)
     vlan_wf = vlan_workflow(org_id, jts)
+    remediate_workflow(org_id, jts)
     rbac(jts, [vlan_wf["id"]], inv, a.secrets_out)
     if not a.skip_eda:
         print("EDA project + rulebook activations")

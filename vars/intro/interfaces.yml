@@ -1,0 +1,37 @@
+---
+# Interface descriptions we want, per device, written as plain data.
+# Used by playbooks/intro_3_configure_interfaces.yml
+# (NetLab Intro 3 - Configure Interface Descriptions).
+#
+# The same data works for Arista and Cisco: only the module name differs
+# (arista.eos.eos_interfaces / cisco.ios.ios_interfaces).
+
+device_interfaces:
+
+  eos-spine1:
+    - name: Ethernet1
+      description: "FABRIC | to eos-leaf1 Ethernet1 | circuit CKT-1001"
+    - name: Ethernet2
+      description: "FABRIC | to ios-leaf2 GigabitEthernet2 | circuit CKT-1002"
+
+  ios-spine2:
+    - name: GigabitEthernet2
+      description: "FABRIC | to eos-leaf1 Ethernet2 | circuit CKT-2001"
+    - name: GigabitEthernet3
+      description: "FABRIC | to ios-leaf2 GigabitEthernet3 | circuit CKT-2002"
+
+  eos-leaf1:
+    - name: Ethernet1
+      description: "UPLINK | to eos-spine1 Ethernet1 | circuit CKT-1001"
+    - name: Ethernet2
+      description: "UPLINK | to ios-spine2 GigabitEthernet2 | circuit CKT-2001"
+    - name: Ethernet3
+      description: "SERVER | host1 | rack A1 port 12"
+
+  ios-leaf2:
+    - name: GigabitEthernet2
+      description: "UPLINK | to eos-spine1 Ethernet2 | circuit CKT-1002"
+    - name: GigabitEthernet3
+      description: "UPLINK | to ios-spine2 GigabitEthernet3 | circuit CKT-2002"
+    - name: GigabitEthernet4
+      description: "SERVER | host2 | rack B4 port 7"

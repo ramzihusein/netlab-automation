@@ -1,0 +1,39 @@
+---
+# Job Template: NetLab Intro 2 - Configure VLANs
+# Purpose: Config as code, the simple version. The VLANs we want are plain
+#          data in vars/intro/vlans.yml; one resource module task makes the
+#          switch match that data. Ansible works out the CLI commands itself.
+#
+# Survey "vlan_state" picks how the module treats what's already there:
+#   merged      add / update the listed VLANs, leave every other VLAN alone
+#   replaced    like merged, but a listed VLAN keeps only the settings in the file
+#   overridden  the file is the complete list: VLANs not in it are DELETED
+#               (also VLANs 10/20, so host1 drops off the network until you
+#               run "NetLab - Check Drift and Remediate")
+#   deleted     remove the listed VLANs
+#
+# Running it twice changes nothing the second time (idempotent).
+#
+# Required AAP Credentials: "NetLab Devices"
+
+- name: Configure VLANs from a variables file
+  hosts: eos-leaf1
+  gather_facts: false
+
+  vars_files:
+    - ../vars/intro/vlans.yml
+
+  vars:
+    vlan_state: merged
+
+  tasks:
+
+    - name: Make the VLANs match vars/intro/vlans.yml ({{ vlan_state }})
+      arista.eos.eos_vlans:
+        config: "{{ vlans }}"
+        state: "{{ vlan_state }}"
+      register: result
+
+    - name: Commands Ansible sent to the switch
+      ansible.builtin.debug:
+        var: result.commands

@@ -1,0 +1,19 @@
+---
+# VLANs we want on the Arista leaf (eos-leaf1), written as plain data.
+# Used by playbooks/intro_2_configure_vlans.yml (NetLab Intro 2 - Configure VLANs).
+#
+# Try it: add a VLAN, rename one or remove one here, commit, and run the job
+# again. Ansible works out the commands; you never write CLI.
+#
+# Each entry uses the field names of the arista.eos.eos_vlans module, so the
+# list can be handed to the module as is.
+
+vlans:
+  - vlan_id: 100
+    name: DEMO-USERS
+
+  - vlan_id: 110
+    name: DEMO-VOICE
+
+  - vlan_id: 120
+    name: DEMO-PRINTERS

@@ -1,0 +1,41 @@
+---
+# Job Template: NetLab Intro 3 - Configure Interface Descriptions
+# Purpose: One set of data, two vendors. The descriptions we want are in
+#          vars/intro/interfaces.yml, per device. Arista and Cisco each have
+#          their own module, but they take exactly the same data.
+#
+# Survey "interface_state":
+#   merged    set the listed descriptions, leave everything else alone
+#   replaced  a listed interface keeps only the settings in the file
+#
+# Required AAP Credentials: "NetLab Devices"
+
+- name: Configure interface descriptions from a variables file
+  hosts: all
+  gather_facts: false
+
+  vars_files:
+    - ../vars/intro/interfaces.yml
+
+  vars:
+    interface_state: merged
+
+  tasks:
+
+    - name: Make the interfaces match vars/intro/interfaces.yml (Arista)
+      arista.eos.eos_interfaces:
+        config: "{{ device_interfaces[inventory_hostname] }}"
+        state: "{{ interface_state }}"
+      register: arista_result
+      when: ansible_network_os == 'arista.eos.eos'
+
+    - name: Make the interfaces match vars/intro/interfaces.yml (Cisco)
+      cisco.ios.ios_interfaces:
+        config: "{{ device_interfaces[inventory_hostname] }}"
+        state: "{{ interface_state }}"
+      register: cisco_result
+      when: ansible_network_os == 'cisco.ios.ios'
+
+    - name: Commands Ansible sent to the device
+      ansible.builtin.debug:
+        msg: "{{ arista_result.commands | default(cisco_result.commands) | default([]) }}"
