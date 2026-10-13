@@ -177,7 +177,7 @@ def credential_types():
             {"id": "host", "label": "Registry host", "type": "string"},
             {"id": "username", "label": "Username", "type": "string"},
             {"id": "password", "label": "Password", "type": "string", "secret": True},
-        ], "required": ["host", "username", "password"]},
+        ], "required": ["host", "username"]},
         "injectors": {"extra_vars": {
             "ee_registry": "{{ host }}",
             "ee_registry_username": "{{ username }}",
@@ -193,9 +193,9 @@ def hub_registry(org_id, login_ct):
     print("Automation hub registry")
     pull, push = find(f"{C}/credentials/", "NetLab Hub Registry"), find(f"{C}/credentials/", "NetLab Hub Push")
     if pull is None or push is None:
-        user, password = os.environ.get("HUB_USERNAME"), os.environ.get("HUB_PASSWORD")
-        if not user or not password:
-            sys.exit("Set HUB_USERNAME and HUB_PASSWORD (automation hub login) for the first run")
+        user, password = os.environ.get("HUB_USERNAME", "admin"), os.environ.get("HUB_PASSWORD", "")
+        if not password:
+            print(f"  ! no HUB_PASSWORD: set the password for '{user}' on both hub credentials in the AAP UI")
         registry = api("GET", f"{C}/credential_types/?namespace=registry")["results"][0]
         pull, _ = ensure(f"{C}/credentials/", "NetLab Hub Registry", {
             "credential_type": registry["id"], "organization": org_id,
