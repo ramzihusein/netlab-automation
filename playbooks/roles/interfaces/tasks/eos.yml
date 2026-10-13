@@ -19,3 +19,18 @@
     config: "{{ lookup('ansible.builtin.template', 'ip_addresses.yml.j2') | from_yaml }}"
     state: replaced
   register: r_ip_addresses
+
+# Deleting a gateway in NetBox should delete it on the device too.
+- name: Read the VLAN interfaces on the device (Arista)
+  arista.eos.eos_command:
+    commands: show running-config | include ^interface Vlan
+  register: device_vlan_interfaces
+  check_mode: false
+
+- name: Remove VLAN interfaces that are no longer in NetBox (Arista)
+  arista.eos.eos_config:
+    lines: "no interface {{ item }}"
+  loop: >-
+    {{ device_vlan_interfaces.stdout[0].splitlines() | map('replace', 'interface ', '') | map('trim')
+       | select | reject('in', interfaces | map(attribute='name')) | list }}
+  register: r_removed_interfaces

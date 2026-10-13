@@ -20,3 +20,18 @@
     config: "{{ lookup('ansible.builtin.template', 'ip_addresses.yml.j2') | from_yaml }}"
     state: replaced
   register: r_ip_addresses
+
+# Deleting a gateway in NetBox should delete it on the device too.
+- name: Read the VLAN subinterfaces on the device (Cisco)
+  cisco.ios.ios_command:
+    commands: show running-config | include ^interface .+[.]
+  register: device_subinterfaces
+  check_mode: false
+
+- name: Remove VLAN subinterfaces that are no longer in NetBox (Cisco)
+  cisco.ios.ios_config:
+    lines: "no interface {{ item }}"
+  loop: >-
+    {{ device_subinterfaces.stdout[0].splitlines() | map('replace', 'interface ', '') | map('trim')
+       | select | reject('in', interfaces | map(attribute='name')) | list }}
+  register: r_removed_interfaces

@@ -16,10 +16,11 @@
     switch_vlans: "{{ lookup('ansible.builtin.template', 'eos_vlans.yml.j2') | from_yaml or [] }}"
   when: ansible_network_os == 'arista.eos.eos'
 
+# overridden: VLANs deleted in NetBox are deleted on the switch too.
 - name: VLANs (Arista)
   arista.eos.eos_vlans:
     config: "{{ switch_vlans }}"
-    state: replaced
+    state: overridden
   when:
     - ansible_network_os == 'arista.eos.eos'
     - switch_vlans | length > 0
