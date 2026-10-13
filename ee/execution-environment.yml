@@ -15,7 +15,7 @@ version: 3
 
 images:
   base_image:
-    name: gateway.aap.ramzidev.com/ee-supported-rhel9:latest
+    name: gateway.aap.ramzidev.com/ee-supported-rhel9:latest   # AAP itself pulls the result as ip-10-0-1-147.us-east-2.compute.internal/netlab-ee
 
 dependencies:
   # ansible-core and ansible-runner are left out on purpose: the supported

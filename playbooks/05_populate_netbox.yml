@@ -73,24 +73,6 @@
     - name: Translate vars/netlab.yml into NetBox objects
       ansible.builtin.include_tasks: tasks/nb_seed_model.yml
 
-    # NetBox is the source of truth once seeded: lab objects that already
-    # exist are skipped, so rerunning never undoes edits made in NetBox.
-    # (The shared building blocks - tags, site, roles, types, ASNs - are kept
-    # in shape on every run.)
-    - name: Read what NetBox already has
-      ansible.builtin.set_fact:
-        have_devices: "{{ devices }}"
-        have_interfaces: "{{ interfaces | map(attribute='device.name') | zip(interfaces | map(attribute='name')) | map('join', ' ') | list }}"
-        have_cabled: "{{ interfaces | selectattr('cable') | map(attribute='device.name') | zip(interfaces | selectattr('cable') | map(attribute='name')) | map('join', ' ') | list }}"
-        have_ips: "{{ query('netbox.netbox.nb_lookup', 'ip-addresses', **lookup_args) | map(attribute='address') | list }}"
-        have_vlans: "{{ query('netbox.netbox.nb_lookup', 'vlans', api_filter='site=' ~ site_slug, **lookup_args) | map(attribute='vid') | list }}"
-        have_prefixes: "{{ query('netbox.netbox.nb_lookup', 'prefixes', **lookup_args) | map(attribute='prefix') | list }}"
-        have_contexts: "{{ query('netbox.netbox.nb_lookup', 'config-contexts', **lookup_args) | map(attribute='name') | list }}"
-        have_sessions: "{{ query('netbox.netbox.nb_lookup', 'session', plugin='bgp', **lookup_args) | map(attribute='name') | list }}"
-      vars:
-        devices: "{{ query('netbox.netbox.nb_lookup', 'devices', api_filter='site=' ~ site_slug, **lookup_args) }}"
-        interfaces: "{{ query('netbox.netbox.nb_lookup', 'interfaces', api_filter='site=' ~ site_slug, **lookup_args) }}"
-
     # ------------------------------------------------------- building blocks
     - name: Tags
       netbox.netbox.netbox_tag:
@@ -166,6 +148,25 @@
       loop: "{{ nodes | unique(attribute='asn') }}"
       loop_control:
         label: "AS{{ item.asn }}"
+
+    # NetBox is the source of truth once seeded: lab objects that already
+    # exist are skipped, so rerunning never undoes edits made in NetBox.
+    # (The building blocks above - tags, site, roles, types, ASNs - are kept
+    # in shape on every run; they also have to exist before NetBox accepts
+    # them as filters here.)
+    - name: Read what NetBox already has
+      ansible.builtin.set_fact:
+        have_devices: "{{ devices }}"
+        have_interfaces: "{{ interfaces | map(attribute='device.name') | zip(interfaces | map(attribute='name')) | map('join', ' ') | list }}"
+        have_cabled: "{{ interfaces | selectattr('cable') | map(attribute='device.name') | zip(interfaces | selectattr('cable') | map(attribute='name')) | map('join', ' ') | list }}"
+        have_ips: "{{ query('netbox.netbox.nb_lookup', 'ip-addresses', **lookup_args) | map(attribute='address') | list }}"
+        have_vlans: "{{ query('netbox.netbox.nb_lookup', 'vlans', api_filter='site=' ~ site_slug, **lookup_args) | map(attribute='vid') | list }}"
+        have_prefixes: "{{ query('netbox.netbox.nb_lookup', 'prefixes', **lookup_args) | map(attribute='prefix') | list }}"
+        have_contexts: "{{ query('netbox.netbox.nb_lookup', 'config-contexts', **lookup_args) | map(attribute='name') | list }}"
+        have_sessions: "{{ query('netbox.netbox.nb_lookup', 'session', plugin='bgp', **lookup_args) | map(attribute='name') | list }}"
+      vars:
+        devices: "{{ query('netbox.netbox.nb_lookup', 'devices', api_filter='site=' ~ site_slug, **lookup_args) }}"
+        interfaces: "{{ query('netbox.netbox.nb_lookup', 'interfaces', api_filter='site=' ~ site_slug, **lookup_args) }}"
 
     # ----------------------------------------------------------- lab objects
     - name: Server VLANs

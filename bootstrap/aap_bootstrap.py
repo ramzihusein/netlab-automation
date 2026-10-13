@@ -29,7 +29,11 @@ BRANCH = "main"
 ORG = "Default"
 EE = "Default execution environment"
 NETLAB_EE = "NetLab EE"            # built from ee/execution-environment.yml
-HUB_REGISTRY = "gateway.aap.ramzidev.com"
+HUB_REGISTRY = "gateway.aap.ramzidev.com"   # push (from the lab host, TLS verify off)
+# AAP pulls by a node name: the gateway certificates are issued (by the AAP
+# installer CA, which execution nodes trust) for node hostnames, not for the
+# public DNS name. Same registry as the built-in "Hub ... execution environment"s.
+HUB_PULL_REGISTRY = "ip-10-0-1-147.us-east-2.compute.internal"
 DE = "Default Decision Environment"
 AWS_CRED = "AWS Creds"
 SSH_CRED = "EC2"
@@ -200,7 +204,7 @@ def hub_registry(org_id, login_ct):
         pull, _ = ensure(f"{C}/credentials/", "NetLab Hub Registry", {
             "credential_type": registry["id"], "organization": org_id,
             "description": "Pull the NetLab EE from the automation hub",
-            "inputs": {"host": HUB_REGISTRY, "username": user, "password": password, "verify_ssl": False},
+            "inputs": {"host": HUB_PULL_REGISTRY, "username": user, "password": password, "verify_ssl": True},
         })
         push, _ = ensure(f"{C}/credentials/", "NetLab Hub Push", {
             "credential_type": login_ct["id"], "organization": org_id,
@@ -208,9 +212,11 @@ def hub_registry(org_id, login_ct):
             "inputs": {"host": HUB_REGISTRY, "username": user, "password": password},
         })
     else:
+        api("PATCH", f"{C}/credentials/{pull['id']}/", {"inputs": dict(
+            pull["inputs"], host=HUB_PULL_REGISTRY, verify_ssl=True)})   # password stays "$encrypted$" = kept
         print("  = credentials: NetLab Hub Registry / NetLab Hub Push (secrets kept)")
     ee, _ = ensure(f"{C}/execution_environments/", NETLAB_EE, {
-        "organization": org_id, "image": f"{HUB_REGISTRY}/netlab-ee:latest", "pull": "always",
+        "organization": org_id, "image": f"{HUB_PULL_REGISTRY}/netlab-ee:latest", "pull": "always",
         "credential": pull["id"],
         "description": "Supported EE + netbox.netbox and pynetbox (ee/execution-environment.yml)",
     })
