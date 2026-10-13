@@ -453,6 +453,8 @@ def job_templates(org_id, proj, ee_id, netlab_ee_id, inv, creds):
          ["devices"], {"diff_mode": True, "survey_enabled": True}),
         ("NetLab Intro 3 - Configure Interface Descriptions", "playbooks/intro_3_configure_interfaces.yml",
          "devices", ["devices"], {"diff_mode": True, "survey_enabled": True, "ask_limit_on_launch": True}),
+        ("NetLab Intro 4 - Configure Banner", "playbooks/intro_4_configure_banner.yml",
+         "devices", ["devices"], {"diff_mode": True, "survey_enabled": True, "ask_limit_on_launch": True}),
         ("NetLab - Stop", "playbooks/08_stop_netlab.yml", "local", ["aws"],
          {"ask_variables_on_launch": True}),
         ("NetLab - Teardown", "playbooks/99_teardown.yml", "local", ["aws"],
@@ -509,6 +511,18 @@ def job_templates(org_id, proj, ee_id, netlab_ee_id, inv, creds):
             "variable": "interface_state", "type": "multiplechoice",
             "choices": ["merged", "replaced"], "default": "merged", "required": True,
         }],
+    })
+    api("POST", f"{C}/job_templates/{jts['NetLab Intro 4 - Configure Banner']['id']}/survey_spec/", {
+        "name": "Banner", "description": "",
+        "spec": [
+            {"question_name": "Which banner?",
+             "question_description": "login = shown before the password prompt; motd = message of the day",
+             "variable": "banner_type", "type": "multiplechoice", "choices": ["login", "motd"],
+             "default": "motd", "required": True},
+            {"question_name": "Banner message", "variable": "banner_text", "type": "textarea",
+             "default": "Change window tonight 22:00-23:00. Contact the network team before making changes.",
+             "required": True, "min": 1, "max": 1000},
+        ],
     })
     ensure(f"{C}/schedules/", "NetLab - Backup Configs before shutdown", {
         "unified_job_template": jts["NetLab - Backup Configs"]["id"],

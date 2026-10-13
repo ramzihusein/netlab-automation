@@ -1,0 +1,44 @@
+---
+# Job Template: NetLab Intro 4 - Configure Banner
+# Purpose: Change a banner on every device from a survey: no files to edit,
+#          just answer two questions in AAP. The same input goes to Arista
+#          and Cisco; each vendor's banner module handles its own syntax.
+#
+# Survey:
+#   banner_type   login (shown before the password prompt) or motd (message
+#                 of the day)
+#   banner_text   the message (several lines are fine)
+#
+# Undo it with "NetLab - Check Drift and Remediate": NetBox owns the banners.
+#
+# Required AAP Credentials: "NetLab Devices"
+
+- name: Configure a banner from survey answers
+  hosts: all
+  gather_facts: false
+
+  vars:
+    banner_type: motd
+    banner_text: "Change window tonight 22:00-23:00. Contact the network team before making changes."
+
+  tasks:
+
+    - name: Set the {{ banner_type }} banner (Arista)
+      arista.eos.eos_banner:
+        banner: "{{ banner_type }}"
+        text: "{{ banner_text }}"
+        state: present
+      register: arista_result
+      when: ansible_network_os == 'arista.eos.eos'
+
+    - name: Set the {{ banner_type }} banner (Cisco)
+      cisco.ios.ios_banner:
+        banner: "{{ banner_type }}"
+        text: "{{ banner_text }}"
+        state: present
+      register: cisco_result
+      when: ansible_network_os == 'cisco.ios.ios'
+
+    - name: Commands Ansible sent to the device
+      ansible.builtin.debug:
+        msg: "{{ arista_result.commands | default(cisco_result.commands) | default([]) }}"

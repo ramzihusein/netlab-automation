@@ -23,3 +23,12 @@
     state: present
   when: netbox_policy.banner is defined
   register: r_banner
+
+# NetBox decides the MOTD banner too: set when the config context has "motd",
+# removed when it doesn't (so a MOTD added any other way counts as drift).
+- name: MOTD banner (Cisco)
+  cisco.ios.ios_banner:
+    banner: motd
+    text: "{{ netbox_policy.motd | default(omit) }}"
+    state: "{{ 'present' if netbox_policy.motd is defined else 'absent' }}"
+  register: r_motd
