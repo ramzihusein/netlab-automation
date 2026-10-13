@@ -23,6 +23,12 @@ dependencies:
   # here would make builder pip-install over them.
   galaxy: requirements.yml
   python: requirements.txt
+  # builder gathers the Python requirements of every collection already in
+  # the base image too; these ship pre-built in it and would otherwise be
+  # recompiled from source (and fail: no systemd headers in the build stage).
+  exclude:
+    python:
+      - systemd-python
 
 options:
   # The RHEL 9 based AAP EEs ship microdnf, not dnf.
