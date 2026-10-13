@@ -1,7 +1,9 @@
 ---
 # Is the fabric healthy? Checked against NetBox, the source of truth:
 #   - every Active BGP session in NetBox is Established on the device
-#   - every device reaches every other device's loopback (sourced from its own)
+#   - every device reaches the other devices' loopbacks (sourced from its own);
+#     spines skip each other: they share an AS, so eBGP loop prevention means
+#     they never learn each other's loopback (by design)
 #   - with check_new_vlan: the spines have a route to the new VLAN's subnet
 # Retries for a minute so it can run straight after a change.
 
@@ -13,10 +15,16 @@
                  headers={'Authorization': 'Token ' ~ netbox_token, 'Accept': 'application/json'})
           | from_json).results }}
     other_loopbacks: >-
-      {{ ansible_play_hosts_all | difference([inventory_hostname])
-         | map('extract', hostvars, 'interfaces') | flatten
+      {{ devices_to_ping | map('extract', hostvars, 'interfaces') | flatten
          | selectattr('name', 'equalto', 'Loopback0') | map(attribute='ip_addresses') | flatten
          | map(attribute='address') | map('ansible.utils.ipaddr', 'address') | list }}
+  vars:
+    spines: >-
+      {{ ansible_play_hosts_all | map('extract', hostvars) | selectattr('device_roles', 'contains', 'spine')
+         | map(attribute='inventory_hostname') | list }}
+    devices_to_ping: >-
+      {{ ansible_play_hosts_all | difference([inventory_hostname])
+         | difference(spines if 'spine' in device_roles else []) }}
 
 - name: Check the device (Arista)
   ansible.builtin.include_tasks: eos.yml

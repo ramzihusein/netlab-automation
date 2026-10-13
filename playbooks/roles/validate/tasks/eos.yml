@@ -13,7 +13,7 @@
 - name: Loopback reachable across the fabric (Arista)
   arista.eos.eos_command:
     commands: "ping {{ loopback }} source Loopback0 repeat 3"
-    wait_for: result[0] matches \s0%
+    wait_for: result[0] contains "received, 0% packet loss"
     retries: 3
     interval: 5
   loop: "{{ other_loopbacks }}"
@@ -23,7 +23,7 @@
 - name: Spine has a route to the new VLAN (Arista)
   arista.eos.eos_command:
     commands: "show ip route {{ gateway_cidr | ansible.utils.ipaddr('network/prefix') }}"
-    wait_for: result[0] matches B\sE
+    wait_for: result[0] contains "B E"
     retries: 6
     interval: 10
   when:
