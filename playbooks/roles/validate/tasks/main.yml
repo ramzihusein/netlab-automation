@@ -5,7 +5,7 @@
 #     spines skip each other: they share an AS, so eBGP loop prevention means
 #     they never learn each other's loopback (by design)
 #   - with check_new_vlan: the spines have a route to the new VLAN's subnet
-# Retries for a minute so it can run straight after a change.
+# Waits up to ~30 s for BGP to converge, so it can run straight after a change.
 
 - name: Read this device's BGP sessions from NetBox
   ansible.builtin.set_fact:
