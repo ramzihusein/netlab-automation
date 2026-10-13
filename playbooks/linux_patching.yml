@@ -36,7 +36,7 @@
     - name: Pending updates (RHEL)
       ansible.builtin.shell: |
         echo "all: $(dnf -q check-update | grep -c '^[[:alnum:]]')"
-        echo "security: $(dnf -q updateinfo list --security | wc -l)"
+        echo "security: $(dnf -q check-update --security | grep -c '^[[:alnum:]]')"
       register: pending_rhel
       changed_when: false
       when: ansible_os_family == 'RedHat'
