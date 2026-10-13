@@ -126,7 +126,7 @@ lab_config_contexts:
       ntp_servers: [169.254.169.123, 192.0.2.123]
       name_servers: [10.0.0.2]
       domain_name: netlab.ramzidev.com
-      syslog_hosts: [192.0.2.50]
+      syslog_hosts: [172.20.20.1]   # lab host: forwards config-change messages to EDA (self-heal)
       snmp_ro_community: netlab-ro
       banner: >-
         Authorized access only. This device is managed by Red Hat Ansible

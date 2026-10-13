@@ -15,6 +15,15 @@
         port: 5000
 
   rules:
+    # AAP writes to NetBox as user "aap" (Populate, the VLAN request
+    # workflow), and whatever made that change also pushes it. Only react to
+    # people's edits, so a change is never pushed twice.
+    - name: Change made by AAP
+      condition: event.payload.username == "aap"
+      action:
+        debug:
+          msg: "{{ event.payload.model }} changed by AAP itself, nothing to do"
+
     # Device-scoped changes: the playbook configures this device plus its
     # cabled BGP neighbors (worked out from NetBox), so pass the device name.
     - name: Device created or updated

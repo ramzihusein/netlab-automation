@@ -1,0 +1,77 @@
+---
+# Job Template: NetLab - Configure Syslog Forwarder
+# Purpose: Installs scripts/syslog_to_eda.py on the lab host as a service, so
+#          device config-change syslog messages reach the EDA event stream
+#          "NetLab Device Syslog" (activation "NetLab Self-Heal").
+#          The devices send syslog to the lab host because the NetBox config
+#          context "NetLab - Global services" lists it in syslog_hosts.
+#
+# Required AAP Credentials: EC2 (SSH), "NetLab Syslog Stream"
+#   (EDA Event Stream Target: eda_event_stream_url/_header/_token)
+
+- name: NetLab — forward device syslog to EDA
+  hosts: role_labhost
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../vars/netlab.yml
+
+  vars:
+    forwarder_dir: /opt/netlab/syslog-to-eda
+    device_names: "{{ dict(lab_nodes | map(attribute='mgmt_ip') | zip(lab_nodes | map(attribute='name'))) }}"
+
+  tasks:
+
+    - name: Install the forwarder script
+      ansible.builtin.copy:
+        src: ../scripts/syslog_to_eda.py
+        dest: "{{ forwarder_dir }}/syslog_to_eda.py"
+        mode: "0755"
+
+    - name: Store the event stream settings
+      ansible.builtin.copy:
+        dest: "{{ forwarder_dir }}/env"
+        mode: "0600"
+        content: |
+          EDA_URL={{ eda_event_stream_url }}
+          EDA_HEADER={{ eda_event_stream_header }}
+          EDA_TOKEN={{ eda_event_stream_token }}
+          LISTEN={{ lab_mgmt_gateway }}:514
+          DEVICES={{ device_names | to_json }}
+      no_log: true
+      notify: Restart forwarder
+
+    - name: Run it as a service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/netlab-syslog-to-eda.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=NetLab: forward device config-change syslog to AAP EDA
+          # The listen address lives on the containerlab mgmt bridge.
+          After=docker.service network-online.target
+
+          [Service]
+          EnvironmentFile={{ forwarder_dir }}/env
+          ExecStart=/usr/bin/python3 {{ forwarder_dir }}/syslog_to_eda.py
+          Restart=always
+          RestartSec=10
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart forwarder
+
+    - name: Enable and start the forwarder
+      ansible.builtin.systemd_service:
+        name: netlab-syslog-to-eda
+        enabled: true
+        state: started
+        daemon_reload: true
+
+  handlers:
+    - name: Restart forwarder
+      ansible.builtin.systemd_service:
+        name: netlab-syslog-to-eda
+        state: restarted
+        daemon_reload: true

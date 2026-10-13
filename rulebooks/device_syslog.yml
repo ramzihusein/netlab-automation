@@ -1,0 +1,42 @@
+---
+# Rulebook activation: "NetLab Self-Heal"
+# The webhook source below is replaced at activation time by the AAP event
+# stream "NetLab Device Syslog", which the lab host's syslog forwarder posts
+# to (scripts/syslog_to_eda.py).
+#
+# Event: {device, source_ip, message}, where message is the device's
+#   %SYS-5-CONFIG_I: Configured from console by admin on vty3 (172.20.20.1)
+#
+# Someone changed a device by hand -> put it back the way NetBox says.
+
+- name: Self-heal out-of-band changes
+  hosts: all
+  sources:
+    - name: device_syslog
+      ansible.eda.webhook:
+        host: 0.0.0.0
+        port: 5000
+
+  rules:
+    # AAP's own pushes log a config change too; they come from the AAP
+    # execution nodes (10.0.x.x), so leave those alone.
+    - name: Change made by AAP
+      condition: event.payload.message is search("[(]10[.]0[.]", ignorecase=true)
+      action:
+        debug:
+          msg: "{{ event.payload.device }} changed by AAP, nothing to do"
+
+    # People often make several changes in a row: wait until it has been
+    # quiet on that device for 20 seconds, then fix it once.
+    - name: Change made by hand
+      condition: event.payload.message is search("CONFIG_I", ignorecase=true)
+      throttle:
+        once_after: 20 seconds
+        group_by_attributes:
+          - event.payload.device
+      action:
+        run_job_template:
+          name: NetLab - Self-Heal Device
+          organization: Default
+          job_args:
+            limit: "{{ event.payload.device }}"

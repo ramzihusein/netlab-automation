@@ -1,0 +1,37 @@
+---
+# Job Template: NetLab - Demo Fault Injection
+# Purpose: Demo only. In the Request Server VLAN workflow, when the requester
+#          ticks "Simulate a bad change", this shuts the leaf's uplinks right
+#          after the change is pushed, so the post-check fails and the
+#          workflow's automatic restore can be shown. Otherwise does nothing.
+#
+# Vars: changed_device (the leaf), demo_fault (yes/no)
+
+- name: Simulate a change that breaks the fabric
+  hosts: "{{ changed_device | default('none') }}"
+  gather_facts: false
+
+  vars:
+    uplinks: >-
+      {{ interfaces | selectattr('link_peers') | selectattr('link_peers.0.device.name', 'search', 'spine')
+         | map(attribute='name') | list }}
+
+  tasks:
+
+    - name: Nothing to break
+      ansible.builtin.meta: end_play
+      when: not (demo_fault | default('no') | bool)
+
+    - name: Shut the uplinks to the spines (Arista)
+      arista.eos.eos_config:
+        parents: "interface {{ item }}"
+        lines: shutdown
+      loop: "{{ uplinks }}"
+      when: ansible_network_os == 'arista.eos.eos'
+
+    - name: Shut the uplinks to the spines (Cisco)
+      cisco.ios.ios_config:
+        parents: "interface {{ item }}"
+        lines: shutdown
+      loop: "{{ uplinks }}"
+      when: ansible_network_os == 'cisco.ios.ios'

@@ -1,0 +1,102 @@
+---
+# Job Template: NetLab - Add Server VLAN to NetBox
+# Purpose: Step of the "NetLab - Request Server VLAN" workflow (runs after the
+#          approval). Records the new VLAN in NetBox, the source of truth:
+#          VLAN, prefix, gateway interface + IP on the leaf, tagged for the
+#          server ACL and for BGP advertisement. The workflow's next step
+#          pushes it to the devices.
+#
+# Survey (on the workflow): vlan_id, vlan_name, changed_device (the leaf),
+#   gateway_cidr (e.g. 172.16.50.1/24)
+# Required AAP Credential: "NetLab NetBox". Runs on the NetLab EE.
+
+- name: Add a server VLAN to NetBox
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    site_slug: netlab-aws
+    leaf: "{{ changed_device }}"
+    lookup_args: {api_endpoint: "{{ netbox_url }}", token: "{{ netbox_token }}", validate_certs: false, raw_data: true}
+    leaf_device: "{{ query('netbox.netbox.nb_lookup', 'devices', api_filter='name=' ~ leaf, **lookup_args)[0] }}"
+    is_cisco: "{{ leaf_device.platform.slug == 'ios' }}"
+    # Cisco leaves route each VLAN on a subinterface of the trunk to the servers.
+    server_trunk: "{{ query('netbox.netbox.nb_lookup', 'interfaces', api_filter='device=' ~ leaf ~ ' mode=tagged', **lookup_args) | first | default({}) }}"
+    gateway_interface: "{{ server_trunk.name ~ '.' ~ vlan_id if is_cisco else 'Vlan' ~ vlan_id }}"
+
+  module_defaults:
+    group/netbox.netbox.netbox:
+      netbox_url: "{{ netbox_url }}"
+      netbox_token: "{{ netbox_token }}"
+      validate_certs: false
+
+  tasks:
+
+    - name: Check the request
+      ansible.builtin.assert:
+        that:
+          - vlan_id | int is number and 2 <= vlan_id | int <= 4094
+          - gateway_cidr | ansible.utils.ipaddr('host/prefix')
+          - leaf_device.role.slug == 'leaf'
+          - vlan_id | int not in query('netbox.netbox.nb_lookup', 'vlans', api_filter='site=' ~ site_slug, **lookup_args) | map(attribute='vid')
+        fail_msg: "Need a free VLAN ID, a leaf, and a gateway like 172.16.50.1/24"
+
+    - name: VLAN
+      netbox.netbox.netbox_vlan:
+        data:
+          vid: "{{ vlan_id | int }}"
+          name: "{{ vlan_name }}"
+          site: "{{ site_slug }}"
+          status: active
+          description: "{{ vlan_name }} servers on {{ leaf }} (requested via AAP)"
+          tags: [netlab]
+
+    - name: Prefix
+      netbox.netbox.netbox_prefix:
+        data:
+          prefix: "{{ gateway_cidr | ansible.utils.ipaddr('network/prefix') }}"
+          status: active
+          vlan: {vid: "{{ vlan_id | int }}", site: "{{ site_slug }}"}
+          description: "{{ vlan_name }} (VLAN {{ vlan_id }})"
+          tags: [netlab]
+
+    - name: Carry the VLAN on the trunk to the servers (Cisco)
+      netbox.netbox.netbox_device_interface:
+        data:
+          device: "{{ leaf }}"
+          name: "{{ server_trunk.name }}"
+          mode: tagged
+          tagged_vlans: >-
+            {%- set out = [] -%}
+            {%- for vid in server_trunk.tagged_vlans | map(attribute='vid') | list | union([vlan_id | int]) -%}
+            {%-   set _ = out.append({'vid': vid, 'site': site_slug}) -%}
+            {%- endfor -%}{{ out }}
+      when: is_cisco
+
+    - name: Gateway interface on the leaf
+      netbox.netbox.netbox_device_interface:
+        data:
+          device: "{{ leaf }}"
+          name: "{{ gateway_interface }}"
+          type: virtual
+          description: "{{ vlan_name }} gateway"
+          parent_interface: "{{ {'device': leaf, 'name': server_trunk.name} if is_cisco else omit }}"
+          mode: "{{ 'access' if is_cisco else omit }}"
+          untagged_vlan: "{{ {'vid': vlan_id | int, 'site': site_slug} if is_cisco else omit }}"
+          tags: [netlab, acl-servers-in, bgp-advertise]
+
+    - name: Gateway IP address
+      netbox.netbox.netbox_ip_address:
+        data:
+          address: "{{ gateway_cidr }}"
+          status: active
+          description: "{{ vlan_name }} gateway"
+          tags: [netlab]
+          assigned_object:
+            device: "{{ leaf }}"
+            name: "{{ gateway_interface }}"
+
+    - name: Show the result
+      ansible.builtin.debug:
+        msg: "VLAN {{ vlan_id }} {{ vlan_name }} with gateway {{ gateway_cidr }} on {{ leaf }} {{ gateway_interface }} is in NetBox"

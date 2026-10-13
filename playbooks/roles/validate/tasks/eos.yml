@@ -1,0 +1,31 @@
+---
+- name: BGP session is Established (Arista)
+  arista.eos.eos_command:
+    commands: "show ip bgp neighbors {{ session.remote_address.address | ansible.utils.ipaddr('address') }} | include BGP state"
+    wait_for: result[0] contains Established
+    retries: 6
+    interval: 10
+  loop: "{{ active_sessions }}"
+  loop_control:
+    loop_var: session
+    label: "{{ session.name }}"
+
+- name: Loopback reachable across the fabric (Arista)
+  arista.eos.eos_command:
+    commands: "ping {{ loopback }} source Loopback0 repeat 3"
+    wait_for: result[0] matches \s0%
+    retries: 3
+    interval: 5
+  loop: "{{ other_loopbacks }}"
+  loop_control:
+    loop_var: loopback
+
+- name: Spine has a route to the new VLAN (Arista)
+  arista.eos.eos_command:
+    commands: "show ip route {{ gateway_cidr | ansible.utils.ipaddr('network/prefix') }}"
+    wait_for: result[0] matches B\sE
+    retries: 6
+    interval: 10
+  when:
+    - check_new_vlan | default(false) | bool
+    - "'spine' in inventory_hostname"

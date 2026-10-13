@@ -10,3 +10,5 @@
 {% if netbox_policy.snmp_ro_community is defined %}
 - snmp-server community {{ netbox_policy.snmp_ro_community }} RO
 {% endif %}
+{# Lets AAP copy a backed-up config onto the device (NetLab - Restore Configs) #}
+- ip scp server enable

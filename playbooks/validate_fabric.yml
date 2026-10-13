@@ -1,0 +1,13 @@
+---
+# Job Template: NetLab - Validate Fabric
+# Purpose: Health check of the running network against NetBox (BGP sessions
+#          up, loopbacks reachable; optionally a new VLAN routed). Changes
+#          nothing. Pre- and post-check in the Request Server VLAN workflow.
+#
+# Required AAP Credentials: "NetLab Devices", "NetLab NetBox"
+
+- name: Validate the fabric against NetBox
+  hosts: all
+  gather_facts: false
+  roles:
+    - validate

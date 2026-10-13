@@ -1,0 +1,86 @@
+---
+# Job Template: NetLab - Restore Configs
+# Purpose: Puts devices back to a backed-up config: the latest backup by
+#          default, or any commit of the backup repo (survey "backup_ref").
+#          The file is copied to the device and swapped in with
+#          "configure replace", so lines added since the backup are removed
+#          too, not just missing lines put back.
+#          Also used by the Request Server VLAN workflow to roll back a change
+#          that failed its post-checks.
+#
+# Required AAP Credentials: "NetLab Devices", "NetLab Config Backups",
+#   "NetLab NetBox" (to note the rollback on the change in NetBox)
+
+- name: Restore device configs from git
+  hosts: all
+  gather_facts: false
+
+  vars:
+    backup_dir: /tmp/netlab-backups
+    backup_ref: main
+    restore_file:
+      arista.eos.eos: /mnt/flash/netlab-restore.cfg
+      cisco.ios.ios: bootflash:netlab-restore.cfg
+
+  tasks:
+
+    - name: Get the backups as of {{ backup_ref }}
+      ansible.builtin.git:
+        repo: "https://x-access-token:{{ backup_repo_token }}@github.com/{{ backup_repo }}.git"
+        dest: "{{ backup_dir }}"
+        version: "{{ backup_ref }}"
+      delegate_to: localhost
+      run_once: true
+      no_log: true
+
+    - name: Show which backup is being restored
+      ansible.builtin.command: git log -1 --format='%h %ad %s' --date=local
+      args:
+        chdir: "{{ backup_dir }}"
+      register: restore_point
+      changed_when: false
+      delegate_to: localhost
+      run_once: true
+
+    - name: Copy the backed-up config to the device
+      ansible.netcommon.net_put:
+        src: "{{ backup_dir }}/configs/{{ inventory_hostname }}.cfg"
+        dest: "{{ restore_file[ansible_network_os] }}"
+
+    - name: Replace the running config with the backup (Arista)
+      arista.eos.eos_command:
+        commands: configure replace flash:netlab-restore.cfg
+      when: ansible_network_os == 'arista.eos.eos'
+
+    - name: Replace the running config with the backup (Cisco)
+      cisco.ios.ios_command:
+        commands: configure replace bootflash:netlab-restore.cfg force
+      when: ansible_network_os == 'cisco.ios.ios'
+
+    - name: Save the restored config
+      ansible.builtin.include_role:
+        name: save_config
+
+    - name: Note the rollback on the VLAN in NetBox (when a VLAN change was rolled back)
+      netbox.netbox.netbox_journal_entry:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        validate_certs: false
+        data:
+          assigned_object_type: ipam.vlan
+          assigned_object_id: "{{ query('netbox.netbox.nb_lookup', 'vlans', api_filter='vid=' ~ vlan_id,
+                                  api_endpoint=netbox_url, token=netbox_token, validate_certs=false, raw_data=true)[0].id }}"
+          kind: danger
+          comments: >-
+            Rolled back by AAP job {{ awx_job_id | default('?') }}: the change failed its post-checks,
+            so the devices were restored to backup {{ restore_point.stdout }}. The VLAN is still
+            in NetBox; fix it (or delete it) and run the request again.
+        state: new
+      delegate_to: localhost
+      run_once: true
+      when: vlan_id is defined
+
+    - name: Show the result
+      ansible.builtin.debug:
+        msg: "Restored {{ ansible_play_hosts | join(', ') }} to backup {{ restore_point.stdout }}"
+      run_once: true

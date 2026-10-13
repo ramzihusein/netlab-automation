@@ -29,6 +29,8 @@ BRANCH = "main"
 ORG = "Default"
 EE = "Default execution environment"
 NETLAB_EE = "NetLab EE"            # built from ee/execution-environment.yml
+BACKUP_REPO = "ramzihusein/netlab-backups"   # private: running configs hold secrets
+G = "/api/gateway/v1"
 HUB_REGISTRY = "gateway.aap.ramzidev.com"   # push (from the lab host, TLS verify off)
 # AAP pulls by a node name: the gateway certificates are issued (by the AAP
 # installer CA, which execution nodes trust) for node hostnames, not for the
@@ -188,7 +190,33 @@ def credential_types():
             "ee_registry_password": "{{ password }}",
         }},
     })
-    return netbox, stream, login
+    repo, _ = ensure(f"{C}/credential_types/", "GitHub Repo Token", {
+        "kind": "cloud",
+        "description": "A GitHub repo (owner/name) and a token that can push to it",
+        "inputs": {"fields": [
+            {"id": "repo", "label": "Repository (owner/name)", "type": "string"},
+            {"id": "token", "label": "Token (fine-grained, Contents read/write)", "type": "string", "secret": True},
+        ], "required": ["repo"]},
+        "injectors": {"extra_vars": {"backup_repo": "{{ repo }}", "backup_repo_token": "{{ token }}"}},
+    })
+    return netbox, stream, login, repo
+
+
+def backup_credential(org_id, repo_ct):
+    print("Config backup repo")
+    cred = find(f"{C}/credentials/", "NetLab Config Backups")
+    if cred is None:
+        token = os.environ.get("BACKUP_REPO_TOKEN", "")
+        if not token:
+            print("  ! no BACKUP_REPO_TOKEN: set the token on 'NetLab Config Backups' in the AAP UI")
+        cred, _ = ensure(f"{C}/credentials/", "NetLab Config Backups", {
+            "credential_type": repo_ct["id"], "organization": org_id,
+            "description": f"Push device config backups to github.com/{BACKUP_REPO} (private)",
+            "inputs": {"repo": BACKUP_REPO, "token": token},
+        })
+    else:
+        print("  = credentials: NetLab Config Backups (token kept)")
+    return cred
 
 
 def hub_registry(org_id, login_ct):
@@ -221,6 +249,37 @@ def hub_registry(org_id, login_ct):
         "description": "Supported EE + netbox.netbox and pynetbox (ee/execution-environment.yml)",
     })
     return push, ee
+
+
+def event_stream(org_id, eda_cts, stream_ct, controller_org_id, stream_name, eda_cred_name,
+                 target_name, description):
+    """An EDA event stream with its own token, plus a controller credential
+    holding the URL + token for whatever posts to it. Returns the stream."""
+    target = find(f"{C}/credentials/", target_name)
+    stream_cred = find(f"{E}/eda-credentials/", eda_cred_name)
+    new_token = None
+    if target is None or stream_cred is None:
+        new_token = secrets.token_urlsafe(32)
+        stream_cred, _ = ensure(f"{E}/eda-credentials/", eda_cred_name, {
+            "credential_type_id": eda_cts["Token Event Stream"], "organization_id": org_id,
+            "description": f"Token for event stream {stream_name}",
+            "inputs": {"auth_type": "token", "token": new_token, "http_header_key": "Authorization"},
+        })
+    else:
+        print(f"  = eda-credentials: {eda_cred_name} (token kept)")
+    stream, _ = ensure(f"{E}/event-streams/", stream_name, {
+        "eda_credential_id": stream_cred["id"], "organization_id": org_id, "test_mode": False,
+    }, update=False)
+    stream["url"] = BASE + urllib.parse.urlsplit(stream["url"]).path
+    if new_token is not None:
+        ensure(f"{C}/credentials/", target_name, {
+            "credential_type": stream_ct["id"], "organization": controller_org_id,
+            "description": description,
+            "inputs": {"url": stream["url"], "header": "Authorization", "token": new_token},
+        })
+    else:
+        print(f"  = credentials: {target_name} (token kept)")
+    return stream
 
 
 def eda_side(org_id, stream_ct):
@@ -366,6 +425,25 @@ def job_templates(org_id, proj, ee_id, netlab_ee_id, inv, creds):
         ("NetLab - Configure NetBox Webhook", "playbooks/07_configure_netbox_webhook.yml", "infra",
          ["ssh", "netbox", "stream", "ingest"], {"survey_enabled": True}),
         ("NetLab - Build Execution Environment", "playbooks/09_build_ee.yml", "infra", ["ssh", "hub_push"], {}),
+        ("NetLab - Configure Syslog Forwarder", "playbooks/10_configure_syslog_forwarder.yml", "infra",
+         ["ssh", "syslog_stream"], {}),
+        # Day-2 operations
+        ("NetLab - Backup Configs", "playbooks/backup_configs.yml", "devices", ["devices", "backup"],
+         {"ask_limit_on_launch": True}),
+        ("NetLab - Restore Configs", "playbooks/restore_configs.yml", "devices", ["devices", "backup", "netbox"],
+         {"ask_limit_on_launch": True, "ask_variables_on_launch": True, "survey_enabled": True,
+          "execution_environment": netlab_ee_id}),
+        ("NetLab - Validate Fabric", "playbooks/validate_fabric.yml", "devices", ["devices", "netbox"],
+         {"ask_limit_on_launch": True, "ask_variables_on_launch": True}),
+        # Self-heal: the same playbook as Configure Devices, run by EDA for one
+        # device someone changed by hand; diff mode shows what was put back.
+        ("NetLab - Self-Heal Device", "playbooks/configure_network.yml", "devices", ["devices", "netbox"],
+         {"ask_limit_on_launch": True, "diff_mode": True}),
+        # Steps of the "NetLab - Request Server VLAN" workflow
+        ("NetLab - Add Server VLAN to NetBox", "playbooks/request_vlan_netbox.yml", "local", ["netbox"],
+         {"ask_variables_on_launch": True, "execution_environment": netlab_ee_id}),
+        ("NetLab - Demo Fault Injection", "playbooks/demo_fault.yml", "devices", ["devices"],
+         {"ask_variables_on_launch": True}),
         ("NetLab - Stop", "playbooks/08_stop_netlab.yml", "local", ["aws"],
          {"ask_variables_on_launch": True}),
         ("NetLab - Teardown", "playbooks/99_teardown.yml", "local", ["aws"],
@@ -393,6 +471,20 @@ def job_templates(org_id, proj, ee_id, netlab_ee_id, inv, creds):
              "type": "multiplechoice", "choices": ["false", "true"], "default": "false", "required": True},
         ],
     })
+    api("POST", f"{C}/job_templates/{jts['NetLab - Restore Configs']['id']}/survey_spec/", {
+        "name": "Restore point", "description": "",
+        "spec": [{
+            "question_name": "Backup to restore",
+            "question_description": "main = the latest backup, or a commit ID from the backup repo history",
+            "variable": "backup_ref", "type": "text", "default": "main", "required": False,
+        }],
+    })
+    ensure(f"{C}/schedules/", "NetLab - Backup Configs before shutdown", {
+        "unified_job_template": jts["NetLab - Backup Configs"]["id"],
+        "description": "Weekdays 18:45 ET, before the power schedule stops the lab",
+        "rrule": "DTSTART;TZID=America/New_York:20261013T184500 RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR",
+        "enabled": True,
+    })
     api("POST", f"{C}/job_templates/{jts['NetLab - Configure NetBox Webhook']['id']}/survey_spec/", {
         "name": "Event path", "description": "",
         "spec": [{
@@ -415,7 +507,14 @@ def workflow(org_id, jts):
         "description": "Builds NetLab, or starts a stopped one: instances, DNS, lab, NetBox, config, EDA, health checks",
     })
     nodes_path = f"{C}/workflow_job_templates/{wf['id']}/workflow_nodes/"
-    if api("GET", nodes_path)["count"]:
+    existing = {n["identifier"]: n for n in api("GET", nodes_path + "?page_size=100")["results"]}
+    if existing:
+        # Added later: the syslog forwarder, once the lab host is set up.
+        if "syslog" not in existing and "labhost" in existing:
+            n = api("POST", nodes_path, {"unified_job_template": jts["NetLab - Configure Syslog Forwarder"]["id"],
+                                         "identifier": "syslog"})
+            api("POST", f"{C}/workflow_job_template_nodes/{existing['labhost']['id']}/success_nodes/", {"id": n["id"]})
+            print("  + workflow node: syslog forwarder")
         print("  = workflow nodes exist")
         return wf
     order = [
@@ -426,6 +525,7 @@ def workflow(org_id, jts):
         ("populate", "NetLab - Populate NetBox", True),
         ("configure", "NetLab - Configure Devices", False),
         ("webhook", "NetLab - Configure NetBox Webhook", False),
+        ("syslog", "NetLab - Configure Syslog Forwarder", False),
     ]
     node = {}
     for ident, jt, converge in order:
@@ -434,10 +534,120 @@ def workflow(org_id, jts):
             "all_parents_must_converge": converge})["id"]
     for parent, child in [("provision", "labhost"), ("provision", "netbox"), ("labhost", "deploy"),
                           ("deploy", "populate"), ("netbox", "populate"), ("populate", "configure"),
-                          ("configure", "webhook")]:
+                          ("configure", "webhook"), ("labhost", "syslog")]:
         api("POST", f"{C}/workflow_job_template_nodes/{node[parent]}/success_nodes/", {"id": node[child]})
     print("  + workflow nodes")
     return wf
+
+
+def vlan_workflow(org_id, jts):
+    """Self-service change with guardrails: backup + pre-check, approval,
+    NetBox, push, (optional demo fault), post-check, restore on failure."""
+    print("Workflow: Request Server VLAN")
+    wf, _ = ensure(f"{C}/workflow_job_templates/", "NetLab - Request Server VLAN", {
+        "organization": org_id, "survey_enabled": True,
+        "description": "Self-service: add a server VLAN. Backup + pre-check, approval, NetBox, push, "
+                       "post-check; automatic restore if the post-check fails",
+    })
+    api("POST", f"{C}/workflow_job_templates/{wf['id']}/survey_spec/", {
+        "name": "Server VLAN request", "description": "",
+        "spec": [
+            {"question_name": "VLAN ID", "variable": "vlan_id", "type": "integer", "min": 2, "max": 4094,
+             "default": 50, "required": True},
+            {"question_name": "VLAN name", "variable": "vlan_name", "type": "text", "default": "ANALYTICS",
+             "required": True},
+            {"question_name": "Leaf switch", "variable": "changed_device", "type": "multiplechoice",
+             "choices": ["eos-leaf1", "ios-leaf2"], "default": "eos-leaf1", "required": True},
+            {"question_name": "Gateway (IP/prefix)", "variable": "gateway_cidr", "type": "text",
+             "default": "172.16.50.1/24", "required": True},
+            {"question_name": "Simulate a bad change (demo the automatic restore)", "variable": "demo_fault",
+             "type": "multiplechoice", "choices": ["no", "yes"], "default": "no", "required": True},
+        ],
+    })
+    nodes_path = f"{C}/workflow_job_templates/{wf['id']}/workflow_nodes/"
+    if api("GET", nodes_path)["count"]:
+        print("  = workflow nodes exist")
+        return wf
+
+    def node(ident, jt=None, extra=None):
+        body = {"identifier": ident}
+        if jt:
+            body["unified_job_template"] = jts[jt]["id"]
+        if extra:
+            body["extra_data"] = extra
+        return api("POST", nodes_path, body)["id"]
+
+    n = {
+        "backup": node("backup", "NetLab - Backup Configs"),
+        "precheck": node("precheck", "NetLab - Validate Fabric"),
+        "approval": node("approval"),
+        "netbox": node("netbox", "NetLab - Add Server VLAN to NetBox"),
+        "push": node("push", "NetLab - Configure Devices"),
+        "fault": node("fault", "NetLab - Demo Fault Injection"),
+        "postcheck": node("postcheck", "NetLab - Validate Fabric", {"check_new_vlan": True}),
+        "restore": node("restore", "NetLab - Restore Configs"),
+    }
+    # The approval step is its own kind of node.
+    api("POST", f"{C}/workflow_job_template_nodes/{n['approval']}/create_approval_template/", {
+        "name": "Network lead approval", "timeout": 3600,
+        "description": "Pre-checks passed and configs are backed up. Approve to add the VLAN.",
+    })
+    links = [("backup", "success", "precheck"), ("precheck", "success", "approval"),
+             ("approval", "success", "netbox"), ("netbox", "success", "push"),
+             ("push", "success", "fault"), ("fault", "always", "postcheck"),
+             ("push", "failure", "restore"), ("postcheck", "failure", "restore")]
+    for parent, kind, child in links:
+        api("POST", f"{C}/workflow_job_template_nodes/{n[parent]}/{kind}_nodes/", {"id": n[child]})
+    print("  + workflow nodes")
+    return wf
+
+
+def rbac(jts, wf_ids, inv, secrets_out):
+    """Team "Network Ops": can run the safe, self-service jobs and see the
+    inventory, but can't change templates or push arbitrary config."""
+    print("RBAC: Network Ops")
+    gw_org = find(f"{G}/organizations/", ORG)
+    team, _ = ensure(f"{G}/teams/", "Network Ops", {
+        "organization": gw_org["id"], "description": "NetLab demo: self-service network operations"})
+    users = api("GET", f"{G}/users/?username=netops")["results"]
+    if users:
+        user = users[0]
+        print("  = users: netops (password kept)")
+    else:
+        password = secrets.token_urlsafe(12)
+        user = api("POST", f"{G}/users/", {"username": "netops", "password": password,
+                                           "first_name": "Network", "last_name": "Operator"})
+        print("  + users: netops")
+        if secrets_out:
+            path = os.path.expanduser(secrets_out)
+            data = json.load(open(path, encoding="utf-8")) if os.path.exists(path) else {}
+            data.update({"aap_netops_user": "netops", "aap_netops_password": password})
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            print(f"  netops password written to {path}")
+    # Team membership is the gateway's "Team Member" role on the team.
+    groles = {r["name"]: r["id"] for r in api("GET", f"{G}/role_definitions/?page_size=200")["results"]}
+    have = api("GET", f"{G}/role_user_assignments/?user={user['id']}&page_size=200")["results"]
+    if not any(a["role_definition"] == groles["Team Member"] and str(a["object_id"]) == str(team["id"])
+               for a in have):
+        api("POST", f"{G}/role_user_assignments/", {"role_definition": groles["Team Member"],
+                                                     "user": user["id"], "object_id": team["id"]})
+        print("  + netops in Network Ops")
+    # What the team may do in automation controller.
+    croles = {r["name"]: r["id"] for r in api("GET", f"{C}/role_definitions/?page_size=200")["results"]}
+    grants = [("JobTemplate Execute", jts[name]["id"]) for name in (
+        "NetLab - Check Config Drift", "NetLab - Backup Configs", "NetLab - Validate Fabric")]
+    grants += [("WorkflowJobTemplate Execute", wf_id) for wf_id in wf_ids]
+    grants += [("Inventory Use", inv["devices"])]
+    team_aid = team["summary_fields"]["resource"]["ansible_id"]
+    have = api("GET", f"{C}/role_team_assignments/?team_ansible_id={team_aid}&page_size=200")["results"]
+    for role, obj in grants:
+        if any(a["role_definition"] == croles[role] and str(a["object_id"]) == str(obj) for a in have):
+            continue
+        api("POST", f"{C}/role_team_assignments/", {"role_definition": croles[role],
+                                                     "team_ansible_id": team_aid, "object_id": obj})
+        print(f"  + {role} on {obj}")
+    return team
 
 
 def eda_project(org_id):
@@ -574,7 +784,7 @@ def main():
 
     org_id = find(f"{C}/organizations/", ORG)["id"]
     eda_org_id = find(f"{E}/organizations/", ORG)["id"]
-    netbox_ct, stream_ct, login_ct = credential_types()
+    netbox_ct, stream_ct, login_ct, repo_ct = credential_types()
     nb_cred, dev_cred = controller_credentials(org_id, netbox_ct, a.secrets_out)
     aap_cred = stream = None
     if not a.skip_eda:
@@ -585,6 +795,15 @@ def main():
         ingest, sqs_cred = aws_event_path(org_id, eda_org_id, a.netbox_events_stack)
 
     hub_push, netlab_ee = hub_registry(org_id, login_ct)
+    backup_cred = backup_credential(org_id, repo_ct)
+    syslog_stream = None
+    if not a.skip_eda:
+        print("EDA event stream: device syslog")
+        eda_cts = {c["name"]: c["id"] for c in api("GET", f"{E}/credential-types/?page_size=200")["results"]}
+        syslog_stream = event_stream(eda_org_id, eda_cts, stream_ct, org_id, "NetLab Device Syslog",
+                                     "NetLab Syslog Forwarder", "NetLab Syslog Stream",
+                                     "Lab host syslog forwarder -> EDA event stream NetLab Device Syslog")
+    syslog_target = find(f"{C}/credentials/", "NetLab Syslog Stream")
     proj = project(org_id)
     infra, devices = inventories(org_id, proj, find(f"{C}/credentials/", AWS_CRED)["id"], nb_cred)
     inv = {"local": find(f"{C}/inventories/", LOCAL_INVENTORY)["id"], "infra": infra["id"],
@@ -593,11 +812,14 @@ def main():
              "ssh": find(f"{C}/credentials/", SSH_CRED)["id"],
              "netbox": nb_cred["id"], "devices": dev_cred["id"],
              "stream": stream_target["id"] if stream_target else None,
-             "ingest": ingest["id"] if ingest else None, "hub_push": hub_push["id"]}
+             "ingest": ingest["id"] if ingest else None, "hub_push": hub_push["id"],
+             "backup": backup_cred["id"], "syslog_stream": syslog_target["id"] if syslog_target else None}
     if creds["stream"] is None:
         sys.exit("NetLab EDA Event Stream credential missing; run without --skip-eda first")
     jts = job_templates(org_id, proj, find(f"{C}/execution_environments/", EE)["id"], netlab_ee["id"], inv, creds)
     wf = workflow(org_id, jts)
+    vlan_wf = vlan_workflow(org_id, jts)
+    rbac(jts, [vlan_wf["id"]], inv, a.secrets_out)
     if not a.skip_eda:
         print("EDA project + rulebook activations")
         eproj = eda_project(eda_org_id)
@@ -609,6 +831,9 @@ def main():
                               [aap_cred["id"], sqs_cred["id"]],
                               "NetBox changes via AWS EventBridge/SQS -> NetLab - Configure Devices",
                               recreate=a.recreate_activations)
+        ensure_activation(eda_org_id, eproj, "NetLab Self-Heal", "device_syslog.yml",
+                          [aap_cred["id"]], "Device changed by hand (syslog) -> NetLab - Self-Heal Device",
+                          stream=syslog_stream, recreate=a.recreate_activations)
 
     print("\nDone.")
     print(f"  Workflow: {BASE}/execution/templates/workflow-job-template/{wf['id']}/details")

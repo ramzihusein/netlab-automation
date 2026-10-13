@@ -1,0 +1,84 @@
+---
+# Job Template: NetLab - Backup Configs
+# Purpose: Saves every device's running config to the private git repo
+#          (one file per device in configs/), so the repo history is a
+#          timeline of the network and any commit can be restored with
+#          "NetLab - Restore Configs".
+#
+# Required AAP Credentials: "NetLab Devices" (device login),
+#   "NetLab Config Backups" (GitHub repo + token)
+
+- name: Back up device configs to git
+  hosts: all
+  gather_facts: false
+
+  vars:
+    backup_dir: /tmp/netlab-backups
+    # Lines that change on every read and would make every backup a "change".
+    volatile_lines:
+      - '^Building configuration'
+      - '^Current configuration :'
+      - '^! Last configuration change at'
+      - '^! NVRAM config last updated at'
+      - '^! Startup-config last modified at'
+      - '^ntp clock-period'
+
+  tasks:
+
+    - name: Get the backup repository
+      ansible.builtin.git:
+        repo: "https://x-access-token:{{ backup_repo_token }}@github.com/{{ backup_repo }}.git"
+        dest: "{{ backup_dir }}"
+        version: main
+      delegate_to: localhost
+      run_once: true
+      no_log: true
+
+    - name: Save the running config (Arista)
+      arista.eos.eos_config:
+        backup: true
+        backup_options:
+          dir_path: "{{ backup_dir }}/configs"
+          filename: "{{ inventory_hostname }}.cfg"
+      when: ansible_network_os == 'arista.eos.eos'
+
+    - name: Save the running config (Cisco)
+      cisco.ios.ios_config:
+        backup: true
+        backup_options:
+          dir_path: "{{ backup_dir }}/configs"
+          filename: "{{ inventory_hostname }}.cfg"
+      when: ansible_network_os == 'cisco.ios.ios'
+
+    - name: Drop lines that change on every read
+      ansible.builtin.lineinfile:
+        path: "{{ backup_dir }}/configs/{{ inventory_hostname }}.cfg"
+        regexp: "{{ item }}"
+        state: absent
+      loop: "{{ volatile_lines }}"
+      delegate_to: localhost
+
+    - name: Commit and push the backups
+      ansible.builtin.shell: |
+        set -e
+        git add configs
+        if git diff --cached --quiet; then
+          echo "No config changes since the last backup"
+          exit 0
+        fi
+        git -c user.name="AAP NetLab" -c user.email="aap-netlab@users.noreply.github.com" \
+          commit -q -m "Backup from AAP job {{ awx_job_id | default('manual') }}" \
+          -m "$(git diff --cached --stat)"
+        git push -q origin main
+        git log -1 --format='Committed %h: %s'
+      args:
+        chdir: "{{ backup_dir }}"
+      register: backup_commit
+      changed_when: "'Committed' in backup_commit.stdout"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Show the result
+      ansible.builtin.debug:
+        msg: "{{ backup_commit.stdout_lines }} (https://github.com/{{ backup_repo }}/commits/main)"
+      run_once: true

@@ -160,7 +160,10 @@
       retries: 60
       delay: 10
 
-    - name: Ensure admin user and AAP API token
+    # People log in as admin; AAP uses its own user "aap", so NetBox's change
+    # log (and the webhook payload's username) shows who changed what, and
+    # EDA can ignore AAP's own edits (rulebooks/netbox_events*.yml).
+    - name: Ensure admin user, AAP user and AAP API token
       ansible.builtin.command:
         cmd: >-
           docker compose exec -T
@@ -168,17 +171,24 @@
           netbox /opt/netbox/netbox/manage.py shell -c "import os;
           from django.contrib.auth import get_user_model;
           from users.models import Token;
-          u, _ = get_user_model().objects.get_or_create(username='admin');
-          u.is_superuser = True; u.is_staff = True; u.is_active = True;
-          u.set_password(os.environ['NB_PASSWORD']); u.save();
-          t, created = Token.objects.get_or_create(user=u, key=os.environ['NB_TOKEN'], defaults={'description': 'AAP'});
-          print('token-created' if created else 'token-exists')"
+          User = get_user_model();
+          admin, _ = User.objects.get_or_create(username='admin');
+          admin.is_superuser = True; admin.is_staff = True; admin.is_active = True;
+          admin.set_password(os.environ['NB_PASSWORD']); admin.save();
+          aap, _ = User.objects.get_or_create(username='aap');
+          aap.is_superuser = True; aap.is_active = True; aap.set_unusable_password(); aap.save();
+          t = Token.objects.filter(key=os.environ['NB_TOKEN']).first();
+          created = t is None;
+          t = t or Token(key=os.environ['NB_TOKEN'], description='AAP');
+          moved = t.user_id is not None and t.user_id != aap.id;
+          t.user = aap; t.save();
+          print('token-created' if created else ('token-moved' if moved else 'token-exists'))"
         chdir: "{{ netbox_docker_dir }}"
       environment:
         NB_PASSWORD: "{{ netbox_admin_password }}"
         NB_TOKEN: "{{ netbox_token }}"
       register: nb_admin
-      changed_when: "'token-created' in nb_admin.stdout"
+      changed_when: "'token-exists' not in nb_admin.stdout"
       no_log: true
 
     - name: Read NetBox status with the AAP token
