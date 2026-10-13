@@ -19,7 +19,7 @@ sysctl_settings:
   vm.swappiness: 10
   net.ipv4.conf.all.accept_redirects: 0
   net.ipv4.conf.all.send_redirects: 0
-  net.ipv4.conf.all.log_martians: 1
+  # (not log_martians: Ubuntu's ufw sets it back whenever the firewall starts)
 
 # Login message
 motd_contact: "#network-ops on Slack"
