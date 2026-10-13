@@ -13,9 +13,8 @@
 - name: Loopback reachable across the fabric (Arista)
   arista.eos.eos_command:
     commands: "ping {{ loopback }} source Loopback0 repeat 3"
-    # All 3 replies back ("3 packets transmitted, 3 received"); wait_for values
-    # can't contain spaces, so '.' stands in for them.
-    wait_for: result[0] matches transmitted,.3.received
+    wait_for:
+      - result[0] contains "3 received, 0% packet loss"
     retries: 3
     interval: 5
   loop: "{{ other_loopbacks }}"
