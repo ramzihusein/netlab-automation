@@ -10,5 +10,9 @@
 {% if netbox_policy.snmp_ro_community is defined %}
 - snmp-server community {{ netbox_policy.snmp_ro_community }} RO
 {% endif %}
-{# Lets AAP copy a backed-up config onto the device (NetLab - Restore Configs) #}
+{# Lets AAP copy a backed-up config onto the device over SCP
+   (NetLab - Restore Configs); the IOS SCP server needs AAA authorization #}
+- aaa new-model
+- aaa authentication login default local
+- aaa authorization exec default local
 - ip scp server enable

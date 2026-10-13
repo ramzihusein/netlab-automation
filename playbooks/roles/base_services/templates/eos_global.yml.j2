@@ -10,3 +10,6 @@
 {% if netbox_policy.snmp_ro_community is defined %}
 - snmp-server community {{ netbox_policy.snmp_ro_community }} ro
 {% endif %}
+{# Logins start in privileged mode, so AAP can copy a backed-up config onto
+   the device over SCP (NetLab - Restore Configs) #}
+- aaa authorization exec default local
