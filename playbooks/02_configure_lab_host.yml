@@ -87,6 +87,27 @@
       args:
         creates: /usr/bin/containerlab
 
+    # Ubuntu's AppArmor profile for rsyslogd attaches by path, so it also
+    # confines the rsyslogd inside cEOS containers, which then can't start:
+    # no remote syslog from the Arista devices. This host only runs the lab.
+    - name: Check for the host rsyslogd AppArmor profile
+      ansible.builtin.stat:
+        path: /etc/apparmor.d/usr.sbin.rsyslogd
+      register: rsyslog_apparmor
+
+    - name: Disable the rsyslogd AppArmor profile (lets cEOS send syslog)
+      ansible.builtin.file:
+        src: /etc/apparmor.d/usr.sbin.rsyslogd
+        dest: /etc/apparmor.d/disable/usr.sbin.rsyslogd
+        state: link
+      register: rsyslog_apparmor_disabled
+      when: rsyslog_apparmor.stat.exists
+
+    - name: Unload the rsyslogd AppArmor profile
+      ansible.builtin.command: apparmor_parser -R /etc/apparmor.d/usr.sbin.rsyslogd
+      when: rsyslog_apparmor_disabled is changed
+      failed_when: false
+
     - name: Enable IPv4 forwarding
       ansible.posix.sysctl:
         name: net.ipv4.ip_forward
