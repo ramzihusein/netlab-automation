@@ -482,7 +482,7 @@ def job_templates(org_id, proj, ee_id, netlab_ee_id, inv, creds):
     ensure(f"{C}/schedules/", "NetLab - Backup Configs before shutdown", {
         "unified_job_template": jts["NetLab - Backup Configs"]["id"],
         "description": "Weekdays 18:45 ET, before the power schedule stops the lab",
-        "rrule": "DTSTART;TZID=America/New_York:20261013T184500 RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR",
+        "rrule": "DTSTART;TZID=America/New_York:20261013T184500 RRULE:FREQ=WEEKLY;INTERVAL=1;BYDAY=MO,TU,WE,TH,FR",
         "enabled": True,
     })
     api("POST", f"{C}/job_templates/{jts['NetLab - Configure NetBox Webhook']['id']}/survey_spec/", {
