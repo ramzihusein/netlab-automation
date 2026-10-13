@@ -382,3 +382,52 @@ change" = yes to see the restore.
 **RBAC**: team **Network Ops** (user `netops`) can run Check Config Drift,
 Backup Configs, Validate Fabric and Request Server VLAN, and use the device
 inventory; nothing else.
+
+## Linux configuration management
+
+Three EC2 servers in the same VPC, managed from AAP on the **Linux EE**:
+- `web1`: RHEL 9, web server.
+- `web2`: Ubuntu 24.04, web server.
+- `db1`: RHEL 9, database server.
+
+They're created by **Linux - Provision / Start Servers** and found by the
+inventory **Linux Servers** (EC2 tag `Project=netlab-linux`). The inventory
+groups them by tag: `web`, `db`, `rhel`, `ubuntu`.
+
+Like NetLab, they're stopped at 19:00 by the power schedule. Start them again
+with the provision job or the fleet workflow.
+
+Everything is data-driven from `vars/linux/*.yml`, and one playbook handles
+both distribution families:
+
+| Job template | Playbook | Shows |
+|---|---|---|
+| Linux - Build Server Fleet (workflow) | — | Provision → packages → users → baseline → RHEL System Roles → web app → report, ~5 min. Survey "brand-new servers?" = yes terminates and rebuilds them first. |
+| Linux - Server Inventory Report | `linux_report.yml` | Facts: OS, kernel, uptime, size, disk, SELinux, for every server, read-only |
+| Linux - Manage Users | `linux_users.yml` + `vars/linux/users.yml` | Groups, accounts, SSH keys, sudo (validated with `visudo`). Offboard someone by setting `state: absent`. |
+| Linux - Install Packages | `linux_packages.yml` + `vars/linux/packages.yml` | Common packages, RHEL/Ubuntu name differences, per-role extras. Survey: extra packages and present/latest/absent. |
+| Linux - Apply Config Baseline | `linux_baseline.yml` + `vars/linux/baseline.yml` | Time zone, SSH hardening (validated with `sshd -t` before it lands), sysctl, firewalld/ufw, MOTD |
+| Linux - Check Baseline Drift | same, check + diff | Exact diff of anything changed by hand |
+| Linux - RHEL System Roles (time sync + SELinux) | `linux_rhel_system_roles.yml` | Red Hat certified content: `timesync` and `selinux` roles |
+| Linux - Patch Servers | `linux_patching.yml` | Rolling, one server at a time. Survey: report / security / all; reboot if needed / never. Checks nginx is back before moving on. |
+| Linux - Deploy Web App | `linux_webapp.yml` | Rolling release to web1 + web2 with a health check. Survey: version, message, colour. Watch http://web1.aap.ramzidev.com and http://web2.aap.ramzidev.com. |
+| Linux - Manage a Service | `linux_service.yml` | Self-service status / restart / stop / start, e.g. for a help desk with RBAC |
+
+Demo flow that works well:
+1. Run the fleet workflow (or show it already done) and open both web pages.
+2. **Inventory Report.**
+3. **Config drift:** SSH in and set `PasswordAuthentication yes` in
+   `/etc/ssh/sshd_config.d/10-baseline.conf`, or append to `/etc/motd`. Run
+   Check Baseline Drift to see the diff, then Apply Config Baseline. Run the
+   drift job again: 0 changes.
+4. **Users:** set `carol` to `absent` in GitHub and run Manage Users. Her
+   account and home directory are gone from all three servers.
+5. **Patch Servers:**
+   - Run it with `report` first.
+   - Then run `security`: RHEL gets a new kernel and reboots one server at a
+     time; Ubuntu patches without a reboot.
+   - Rebuild beforehand for a real backlog.
+6. **Deploy Web App:** v2, blue. Refresh the pages while it rolls through.
+
+Gotcha: on Ubuntu, ufw resets `net.ipv4.conf.all.log_martians` when it starts,
+so the baseline doesn't manage it (it would show as drift on every run).
