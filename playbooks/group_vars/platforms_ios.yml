@@ -2,3 +2,7 @@
 # Cisco devices from the NetBox inventory (NetBox platform "ios")
 ansible_connection: ansible.netcommon.network_cli
 ansible_network_os: cisco.ios.ios
+
+# containerlab's Cisco images (vrnetlab) put the management interface in this
+# VRF, so anything sent to the management network (syslog) must name it.
+mgmt_vrf: clab-mgmt
