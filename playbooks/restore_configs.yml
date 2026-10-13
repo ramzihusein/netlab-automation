@@ -44,13 +44,29 @@
       delegate_to: localhost
       run_once: true
 
+    # IOS shows the built-in Cisco licensing trustpoint's "enrollment" line
+    # differently from one read to the next, and configure replace can't
+    # change it, so the restore keeps whatever the device has now.
+    - name: Read the licensing trustpoint (Cisco)
+      cisco.ios.ios_command:
+        commands: show running-config | section crypto pki trustpoint SLA-TrustPoint
+      register: sla_trustpoint
+      when: ansible_network_os == 'cisco.ios.ios'
+
     # show running-config prints a banner's end marker as the two characters
     # "^C"; a config file needs the real Ctrl-C character there.
     - name: Prepare the backed-up config for the device
       ansible.builtin.copy:
         dest: "/tmp/netlab-restore-{{ inventory_hostname }}.cfg"
-        content: "{{ lookup('ansible.builtin.file', backup_dir ~ '/configs/' ~ inventory_hostname ~ '.cfg') | replace('^C', '\x03') }}\n"
+        content: "{{ restore_config | replace('^C', '\x03') }}\n"
         mode: "0644"
+      vars:
+        backup_config: "{{ lookup('ansible.builtin.file', backup_dir ~ '/configs/' ~ inventory_hostname ~ '.cfg') }}"
+        current_enrollment: >-
+          {{ (sla_trustpoint.stdout | default(['']))[0] | regex_search('enrollment \\S+') or '' }}
+        restore_config: >-
+          {{ backup_config | regex_replace('(crypto pki trustpoint SLA-TrustPoint\\n )enrollment \\S+', '\\1' ~ current_enrollment)
+             if current_enrollment else backup_config }}
       delegate_to: localhost
 
     - name: Copy the backed-up config to the device
