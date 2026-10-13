@@ -330,8 +330,9 @@ Self-Heal**): devices send syslog to the lab host (NetBox config context
 `syslog_hosts`), where `scripts/syslog_to_eda.py` forwards config-change
 messages (`%SYS-5-CONFIG_I`) to the EDA event stream **NetLab Device Syslog**.
 A change made by a person (not from an AAP execution node) runs **NetLab -
-Self-Heal Device** for that device, 20 s after the last change, in diff mode
-so the job shows what was put back.
+Self-Heal Device** for that device straight away, in diff mode
+so the job shows what was put back. Further changes to the same device within
+60 s are covered by that job (one job per device per minute).
 
 **Request Server VLAN** (workflow, survey): backup → **Validate Fabric**
 (pre-check) → **approval** → add the VLAN to NetBox (as user `aap`, so EDA

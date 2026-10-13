@@ -712,7 +712,7 @@ def ensure_activation(org_id, proj, name, rulebook, eda_creds, description, stre
         "organization_id": org_id, "project_id": proj["id"], "rulebook_id": rb["id"],
         "decision_environment_id": find(f"{E}/decision-environments/", DE)["id"],
         "eda_credentials": eda_creds,
-        "restart_policy": "on-failure", "log_level": "info", "is_enabled": True,
+        "restart_policy": "always", "log_level": "info", "is_enabled": True,
     }
     if mapping is not None:
         body["source_mappings"] = mapping

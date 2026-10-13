@@ -18,20 +18,16 @@
         port: 5000
 
   rules:
-    # AAP's own pushes log a config change too; they come from the AAP
-    # execution nodes (10.0.x.x), so leave those alone.
-    - name: Change made by AAP
-      condition: event.payload.message is search("[(]10[.]0[.]", ignorecase=true)
-      action:
-        debug:
-          msg: "{{ event.payload.device }} changed by AAP, nothing to do"
-
-    # People often make several changes in a row: wait until it has been
-    # quiet on that device for 20 seconds, then fix it once.
+    # A config change that didn't come from AAP: AAP's own pushes log one too,
+    # but from the AAP nodes (10.0.x.x), so those are left alone.
+    # A device logs one message per config session; if more arrive for the
+    # same device within a minute, they're covered by the job already running.
     - name: Change made by hand
-      condition: event.payload.message is search("SYS-5-CONFIG", ignorecase=true)
+      condition: >-
+        event.payload.message is search("SYS-5-CONFIG", ignorecase=true)
+        and event.payload.message is not search("[(]10[.]0[.]", ignorecase=true)
       throttle:
-        once_after: 20 seconds
+        once_within: 60 seconds
         group_by_attributes:
           - event.payload.device
       action:
