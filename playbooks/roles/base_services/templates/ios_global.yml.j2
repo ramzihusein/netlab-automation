@@ -5,7 +5,7 @@
 - ip domain name {{ netbox_policy.domain_name }}
 {% endif %}
 {% for server in netbox_policy.name_servers | default([]) %}
-- ip name-server {{ server }}
+- ip name-server {{ ('vrf ' ~ mgmt_vrf ~ ' ') if mgmt_vrf is defined else '' }}{{ server }}
 {% endfor %}
 {% if netbox_policy.snmp_ro_community is defined %}
 - snmp-server community {{ netbox_policy.snmp_ro_community }} RO

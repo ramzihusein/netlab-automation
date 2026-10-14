@@ -1,5 +1,10 @@
-{# Same shape for eos_ntp_global and ios_ntp_global #}
+{# Same shape for eos_ntp_global and ios_ntp_global. Cisco's management
+   interface is in a VRF (mgmt_vrf), its only way out of the lab, so NTP
+   has to use that VRF #}
 servers:
 {% for server in netbox_policy.ntp_servers | default([]) %}
   - server: {{ server }}
+{% if mgmt_vrf is defined %}
+    vrf: {{ mgmt_vrf }}
+{% endif %}
 {% endfor %}
