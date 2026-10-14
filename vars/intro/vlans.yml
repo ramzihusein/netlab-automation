@@ -17,3 +17,6 @@ vlans:
 
   - vlan_id: 120
     name: DEMO-PRINTERS
+
+  - vlan_id: 130
+    name: DEMO
