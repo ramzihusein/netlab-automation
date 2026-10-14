@@ -459,7 +459,7 @@ def job_templates(org_id, proj, ee_id, netlab_ee_id, inv, creds):
         ("NetLab Intro 1 - Read Device Config as Data", "playbooks/intro_1_read_config.yml", "devices",
          ["devices"], {"ask_limit_on_launch": True}),
         ("NetLab Intro 2 - Configure VLANs", "playbooks/intro_2_configure_vlans.yml", "devices",
-         ["devices"], {"diff_mode": True, "survey_enabled": True}),
+         ["devices"], {"diff_mode": True, "survey_enabled": True, "ask_variables_on_launch": True}),
         ("NetLab Intro 3 - Configure Interface Descriptions", "playbooks/intro_3_configure_interfaces.yml",
          "devices", ["devices"], {"diff_mode": True, "survey_enabled": True, "ask_limit_on_launch": True}),
         ("NetLab Intro 4 - Configure Banner", "playbooks/intro_4_configure_banner.yml",

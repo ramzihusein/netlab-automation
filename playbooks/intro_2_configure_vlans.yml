@@ -14,10 +14,14 @@
 #
 # Running it twice changes nothing the second time (idempotent).
 #
+# Launched with extra vars (e.g. by an AI assistant through the AAP MCP
+# server), the same playbook takes the VLANs and the switch from the request:
+#   vlans: [{vlan_id: 300, name: GUEST-WIFI}], vlan_device: eos-spine1
+#
 # Required AAP Credentials: "NetLab Devices"
 
 - name: Configure VLANs from a variables file
-  hosts: eos-leaf1
+  hosts: "{{ vlan_device | default('eos-leaf1') }}"
   gather_facts: false
 
   vars_files:
