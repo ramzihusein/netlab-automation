@@ -311,6 +311,11 @@ modules**:
 | NetLab Intro 4 - Configure Banner | `intro_4_configure_banner.yml` | No data file: a survey picks `login` or `motd` and takes the message. One input for both vendors; the output shows Arista's `EOF` against Cisco's `@` delimiters. |
 | NetLab - Check Drift and Remediate (workflow) | — | Drift report (with the commands that would fix it) → approval → Configure Devices → drift check again ("In sync with NetBox"). |
 
+Intro 2 also accepts the extra vars `vlans` (list of `{vlan_id, name}`) and
+`vlan_device`, so an AI assistant connected to the AAP MCP server can run it for
+a request like "add VLANs 300 and 310 to eos-leaf1" through the same governed
+job template.
+
 These jobs run from AAP, so self-heal ignores the changes. They stay on the
 devices until you remediate. The workflow then shows NetBox as the source of
 truth and resets the lab in one go.
