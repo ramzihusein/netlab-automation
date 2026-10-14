@@ -4,6 +4,23 @@
     lines: "{{ lookup('ansible.builtin.template', 'ios_global.yml.j2') | from_yaml }}"
   register: r_global_settings
 
+# Name servers belong in the management VRF (the only way out); remove any
+# configured outside it, e.g. from before mgmt_vrf was used for DNS.
+- name: Read the name servers on the device (Cisco)
+  cisco.ios.ios_command:
+    commands: show running-config | include ^ip name-server
+  register: device_name_servers
+  check_mode: false
+  when: mgmt_vrf is defined
+
+- name: Remove name servers outside the management VRF (Cisco)
+  cisco.ios.ios_config:
+    lines: "no {{ item }}"
+  loop: >-
+    {{ (device_name_servers.stdout | default(['']))[0].splitlines() | map('trim') | select('match', 'ip name-server [0-9]') | list }}
+  when: mgmt_vrf is defined
+  register: r_removed_name_servers
+
 - name: NTP servers (Cisco)
   cisco.ios.ios_ntp_global:
     config: "{{ lookup('ansible.builtin.template', 'ntp.yml.j2') | from_yaml }}"
