@@ -20,6 +20,16 @@
     state: replaced
   register: r_ip_addresses
 
+# A VLAN interface on Arista stays down until a port in that VLAN is up, so a
+# new server VLAN (no servers cabled yet) would have no connected route and
+# BGP wouldn't advertise it. Gateways stay up regardless.
+- name: Keep gateway VLAN interfaces up (Arista)
+  arista.eos.eos_config:
+    lines: no autostate
+    parents: "interface {{ item }}"
+  loop: "{{ interfaces | map(attribute='name') | select('match', 'Vlan') | list }}"
+  register: r_gateway_state
+
 # Deleting a gateway in NetBox should delete it on the device too.
 - name: Read the VLAN interfaces on the device (Arista)
   arista.eos.eos_command:
