@@ -31,4 +31,4 @@ users:
     comment: Carol Chen (Contractor)
     groups: [developers]
     ssh_key: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMprWAK/NbX5pt8uPUPnanPvgUZeBiRnNLAv9t5qUeEm carol@example.com
-    state: present      # contract ended? change to absent
+    state: absent       # contract ended? change to absent
