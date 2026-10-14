@@ -27,7 +27,7 @@
 
   tasks:
 
-    - name: Baseline packages ({{ ansible_os_family }}, {{ group_names | join(', ') }})
+    - name: Baseline packages (common + per OS + per role)
       ansible.builtin.package:
         name: "{{ wanted }}"
         state: present
