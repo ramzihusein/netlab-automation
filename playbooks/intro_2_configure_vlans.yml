@@ -32,7 +32,7 @@
 
   tasks:
 
-    - name: Make the VLANs match vars/intro/vlans.yml ({{ vlan_state }})
+    - name: Make the VLANs on {{ inventory_hostname }} match the list ({{ vlan_state }})
       arista.eos.eos_vlans:
         config: "{{ vlans }}"
         state: "{{ vlan_state }}"
