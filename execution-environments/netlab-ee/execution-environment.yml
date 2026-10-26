@@ -23,12 +23,31 @@ dependencies:
   # here would make builder pip-install over them.
   galaxy: requirements.yml
   python: requirements.txt
+  # The base image runs ansible on Python 3.12. Say so explicitly: builder
+  # otherwise uses /usr/bin/python3, which the RHEL packages below repoint.
+  python_interpreter:
+    python_path: /usr/bin/python3.12
   # builder gathers the Python requirements of every collection already in
   # the base image too; these ship pre-built in it and would otherwise be
   # recompiled from source (and fail: no systemd headers in the build stage).
   exclude:
     python:
       - systemd-python
+    # Likewise for the base image collections' system packages: on RHEL 9
+    # these are Python 3.9 builds, and installing python3-devel switches
+    # /usr/bin/python3 to 3.9 (no pip). The 3.12 equivalents are already in
+    # the base image.
+    system:
+      - dnf
+      - python3-Cython
+      - python3-cffi
+      - python3-cryptography
+      - python3-devel
+      - python3-jmespath
+      - python3-lxml
+      - python3-netaddr
+      - python3-pycparser
+      - python3-rpm
 
 options:
   # The RHEL 9 based AAP EEs ship microdnf, not dnf.
