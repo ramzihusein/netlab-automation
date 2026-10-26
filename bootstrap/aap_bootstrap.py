@@ -666,6 +666,46 @@ def vlan_workflow(org_id, jts):
     return wf
 
 
+def servicenow_side(org_id, proj, netlab_ee_id, devices_inv_id):
+    """ServiceNow developer instance: NetBox stays the source of truth for the
+    network; this job copies the devices into the CMDB."""
+    print("ServiceNow")
+    sn_ct, _ = ensure(f"{C}/credential_types/", "ServiceNow Instance", {
+        "kind": "cloud",
+        "description": "ServiceNow instance + login, as the env vars the servicenow.itsm collection reads",
+        "inputs": {"fields": [
+            {"id": "host", "label": "Instance URL (https://devNNNNN.service-now.com)", "type": "string"},
+            {"id": "username", "label": "Username", "type": "string"},
+            {"id": "password", "label": "Password", "type": "string", "secret": True},
+        ], "required": ["host", "username", "password"]},
+        "injectors": {"env": {"SN_HOST": "{{ host }}", "SN_USERNAME": "{{ username }}",
+                              "SN_PASSWORD": "{{ password }}"}},
+    })
+    cred = find(f"{C}/credentials/", "NetLab ServiceNow")
+    if cred is None:
+        if not os.environ.get("SN_HOST"):
+            print("  ! no SN_HOST / SN_USERNAME / SN_PASSWORD: skipping ServiceNow")
+            return None
+        cred, _ = ensure(f"{C}/credentials/", "NetLab ServiceNow", {
+            "credential_type": sn_ct["id"], "organization": org_id,
+            "description": "ServiceNow developer instance (CMDB / ITSM demo)",
+            "inputs": {"host": os.environ["SN_HOST"], "username": os.environ["SN_USERNAME"],
+                       "password": os.environ["SN_PASSWORD"]},
+        })
+    else:
+        print("  = credentials: NetLab ServiceNow (secrets kept)")
+    jt, _ = ensure(f"{C}/job_templates/", "NetLab - Sync Network Devices to CMDB", {
+        "job_type": "run", "organization": org_id, "project": proj["id"],
+        "playbook": "playbooks/servicenow_sync_network.yml", "inventory": devices_inv_id,
+        "execution_environment": netlab_ee_id,
+        "description": "NetBox -> ServiceNow CMDB (one way; NetBox is the source of truth)",
+    })
+    have = {c["id"] for c in api("GET", f"{C}/job_templates/{jt['id']}/credentials/")["results"]}
+    if cred["id"] not in have:
+        api("POST", f"{C}/job_templates/{jt['id']}/credentials/", {"id": cred["id"]})
+    return cred
+
+
 def linux_side(org_id, proj, creds):
     """Linux configuration management demo: servers web1/web2/db1 (EC2), their
     inventory, and the job templates, all on the Linux EE."""
@@ -1038,6 +1078,7 @@ def main():
     vlan_wf = vlan_workflow(org_id, jts)
     remediate_workflow(org_id, jts)
     linux_side(org_id, proj, creds)
+    servicenow_side(org_id, proj, netlab_ee["id"], devices["id"])
     rbac(jts, [vlan_wf["id"]], inv, a.secrets_out)
     if not a.skip_eda:
         print("EDA project + rulebook activations")

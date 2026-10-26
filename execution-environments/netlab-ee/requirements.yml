@@ -4,3 +4,5 @@
 collections:
   - name: netbox.netbox
     version: ">=3.23.0,<4.0.0"
+  - name: servicenow.itsm
+    version: ">=2.16.0,<3.0.0"

@@ -1,0 +1,65 @@
+---
+# Job Template: NetLab - Sync Network Devices to CMDB
+# Purpose: Copy the lab's network devices from NetBox (the source of truth)
+#          into the ServiceNow CMDB, so incidents and change requests can
+#          point at them. One way only: edits made in ServiceNow are
+#          overwritten on the next run. Devices removed from NetBox are
+#          marked Retired in the CMDB, not deleted.
+#
+# Inventory: "NetLab Devices" (NetBox). Nothing connects to the devices; the
+#            NetBox inventory already holds everything the CMDB needs.
+# Required AAP Credentials: "NetLab ServiceNow"
+
+- name: Sync network devices from NetBox to the ServiceNow CMDB
+  hosts: all
+  gather_facts: false
+  connection: local
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    # Marks the records this job owns; also what the retire step looks for.
+    cmdb_marker: "Managed in NetBox (NetLab) - edits here are overwritten"
+    network_platforms: [eos, ios]
+    # NetBox device status -> CMDB install status
+    install_status_map:
+      active: installed
+      planned: pending_install
+      staged: pending_install
+      offline: in_maintenance
+      decommissioning: pending_repair
+  tasks:
+    - name: Create or update the CMDB record
+      servicenow.itsm.configuration_item:
+        name: "{{ inventory_hostname }}"
+        sys_class_name: cmdb_ci_ip_switch
+        short_description: "{{ cmdb_marker }}"
+        ip_address: "{{ primary_ip4 | default(omit) }}"
+        serial_number: "{{ serial | default(omit, true) }}"
+        install_status: "{{ install_status_map[status.value] | default('installed') }}"
+        operational_status: "{{ 'operational' if status.value == 'active' else 'non_operational' }}"
+        other:
+          model_number: "{{ device_types | default(['']) | first }}"
+          comments: >-
+            NetBox: site {{ sites | default(['?']) | first }},
+            role {{ device_roles | default(['?']) | first }},
+            platform {{ platforms | first }}
+      when: platforms | default([]) | intersect(network_platforms) | length > 0
+
+    - name: Retire CMDB records for devices no longer in NetBox
+      run_once: true
+      block:
+        - name: Find the records this job owns
+          servicenow.itsm.configuration_item_info:
+            sys_class_name: cmdb_ci_ip_switch
+            # install_status 7 = Retired
+            sysparm_query: "short_descriptionLIKEManaged in NetBox (NetLab)^install_status!=7"
+          register: owned
+
+        - name: Mark them Retired
+          servicenow.itsm.configuration_item:
+            sys_id: "{{ item.sys_id }}"
+            sys_class_name: cmdb_ci_ip_switch
+            install_status: retired
+            operational_status: retired
+          loop: "{{ owned.records | rejectattr('name', 'in', ansible_play_hosts_all) | list }}"
+          loop_control:
+            label: "{{ item.name }}"
