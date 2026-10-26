@@ -742,14 +742,24 @@ def linux_side(org_id, proj, creds, sn_cred=None):
     }
     use = "Linux CMDB" if sn_cred else "Linux EC2"
     ensure(f"{C}/inventory_sources/", use, dict(sources[use], **{
-        "inventory": inv["id"], "overwrite": True, "update_on_launch": True, "update_cache_timeout": 0,
+        "inventory": inv["id"], "overwrite": True, "overwrite_vars": True,
+        "update_on_launch": True, "update_cache_timeout": 0,
     }), inventory=inv["id"])
-    # One source only: two would each own the same host names.
+    # One source only: two would each own the same host names. Deleting a
+    # source leaves its hosts and groups behind, so remove those first.
     for other in set(sources) - {use}:
         old = find(f"{C}/inventory_sources/", other, inventory=inv["id"])
         if old:
+            api("DELETE", f"{C}/inventory_sources/{old['id']}/hosts/")
+            api("DELETE", f"{C}/inventory_sources/{old['id']}/groups/")
             api("DELETE", f"{C}/inventory_sources/{old['id']}/")
-            print(f"  - inventory_sources: {other}")
+            print(f"  - inventory_sources: {other} (and its hosts)")
+    # Left behind by an EC2 source deleted before the cleanup above existed.
+    if sn_cred:
+        stale = find(f"{C}/groups/", "aws_ec2", inventory=inv["id"])
+        if stale:
+            api("DELETE", f"{C}/groups/{stale['id']}/")
+            print("  - groups: aws_ec2 (left over from Linux EC2)")
     local = find(f"{C}/inventories/", LOCAL_INVENTORY)["id"]
     pv = {k: PROVISION_VARS[k] for k in ("vpc_id", "subnet_id", "key_pair_name", "aap_security_group_ids",
                                           "route53_zone_id", "admin_cidrs")}
