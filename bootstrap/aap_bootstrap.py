@@ -678,8 +678,10 @@ def servicenow_side(org_id, proj, netlab_ee_id, devices_inv_id):
             {"id": "username", "label": "Username", "type": "string"},
             {"id": "password", "label": "Password", "type": "string", "secret": True},
         ], "required": ["host", "username", "password"]},
+        # SN_TIMEOUT: a developer instance can take well over the default 10 s
+        # to answer a CMDB update.
         "injectors": {"env": {"SN_HOST": "{{ host }}", "SN_USERNAME": "{{ username }}",
-                              "SN_PASSWORD": "{{ password }}"}},
+                              "SN_PASSWORD": "{{ password }}", "SN_TIMEOUT": "60"}},
     })
     cred = find(f"{C}/credentials/", "NetLab ServiceNow")
     if cred is None:
