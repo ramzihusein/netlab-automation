@@ -60,7 +60,8 @@
         install_status: pending_install
         operational_status: non_operational
         other:
-          os: "{{ cmdb_os[item.os] }}"
+          os: "{{ cmdb_os[item.os].os }}"
+          os_version: "{{ cmdb_os[item.os].os_version }}"
           subcategory: "{{ item.role }}"
       loop: "{{ requested }}"
       loop_control:

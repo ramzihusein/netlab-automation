@@ -9,7 +9,7 @@
 #   short_description  "NetLab demo server"  marks our records; the developer
 #                                            instance ships hundreds of fake ones
 #   subcategory        web / db              server role -> groups web, db
-#   os                 Linux Red Hat / Linux Ubuntu      -> groups rhel, ubuntu
+#   os_version         RHEL 9 / Ubuntu 24.04             -> groups rhel, ubuntu
 #   install_status     Installed             only built servers are listed
 #   ip_address         private IP, written by Linux - Provision / Start Servers
 plugin: servicenow.itsm.now
@@ -20,8 +20,8 @@ keyed_groups:
   - key: subcategory
     separator: ""
 groups:
-  rhel: os == "Linux Red Hat"
-  ubuntu: os == "Linux Ubuntu"
+  rhel: os_version.startswith("RHEL")
+  ubuntu: os_version.startswith("Ubuntu")
 compose:
   ansible_host: ip_address
-  ansible_user: "'ec2-user' if os == 'Linux Red Hat' else 'ubuntu'"
+  ansible_user: "'ubuntu' if os_version.startswith('Ubuntu') else 'ec2-user'"

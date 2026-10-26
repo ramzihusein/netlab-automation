@@ -18,9 +18,11 @@ standard_servers:
 cmdb_server_class: cmdb_ci_linux_server
 # Marks our records; the developer instance ships hundreds of fake servers.
 cmdb_server_marker: NetLab demo server
-# OS -> CMDB "Operating System" (os) value, and back.
+# OS -> CMDB fields. "OS Version" (free text) says which distribution it is.
+# "Operating System" is a fixed choice list on the instance, with no Ubuntu
+# entry out of the box, so it's only filled in where there's a match.
 cmdb_os:
-  rhel: Linux Red Hat
-  ubuntu: Linux Ubuntu
+  rhel: {os: Linux Red Hat, os_version: RHEL 9}
+  ubuntu: {os: "", os_version: Ubuntu 24.04}
 # The role goes in the CMDB "Subcategory" field.
 server_roles: [web, db]

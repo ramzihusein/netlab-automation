@@ -397,7 +397,7 @@ Three EC2 servers in the same VPC, managed from AAP on the **Linux EE**:
 
 The **ServiceNow CMDB** owns the server list (`cmdb_ci_linux_server`
 records with short description `NetLab demo server`; role in Subcategory,
-OS in Operating System; see `vars/linux/servers.yml`):
+distribution in OS Version; see `vars/linux/servers.yml`):
 1. **Linux - Request Server in CMDB** creates the record (Pending Install). Leave
    the name empty to register the standard fleet. Adding a record by hand in
    ServiceNow works the same way.
