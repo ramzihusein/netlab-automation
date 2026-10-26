@@ -28,13 +28,13 @@
       {%- endfor -%}
       {{ out }}
 
-- name: Build the prefix list (fabric pools + one per server VLAN)
+- name: Build the prefix list (fabric pools, one per server VLAN, AWS)
   ansible.builtin.set_fact:
     seed_prefixes: >-
       {%- set out = [
         {'prefix': '192.168.254.0/24', 'status': 'container', 'description': 'Fabric point-to-point /31s'},
         {'prefix': '192.168.255.0/24', 'status': 'container', 'description': 'Loopbacks / router IDs'},
-        {'prefix': '172.16.0.0/16', 'status': 'container', 'description': 'Server VLANs'}] -%}
+        {'prefix': '172.16.0.0/16', 'status': 'container', 'description': 'Server VLANs'}] + aws_prefixes -%}
       {%- for v in seed_vlans -%}
       {%-   set _ = out.append({'prefix': v.gateway | ansible.utils.ipaddr('network/prefix'), 'status': 'active',
                                 'vlan': {'vid': v.vid, 'site': site_slug}, 'description': v.name ~ ' (VLAN ' ~ v.vid ~ ')'}) -%}

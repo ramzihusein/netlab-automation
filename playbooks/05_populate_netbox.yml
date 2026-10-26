@@ -191,6 +191,20 @@
         label: "{{ item.prefix }}"
       when: item.prefix not in have_prefixes
 
+    # netbox.netbox has no module for IP ranges.
+    - name: Look for the Linux demo servers' address range
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/ip-ranges/?start_address={{ linux_server_range.start_address | ansible.utils.ipaddr('address') }}"
+      register: server_range
+
+    - name: Address range for the Linux demo servers
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/ip-ranges/"
+        method: POST
+        body: "{{ linux_server_range | combine({'status': 'active', 'tags': [{'slug': netlab_tag}]}) }}"
+        status_code: 201
+      when: server_range.json.count == 0
+
     - name: Network devices
       netbox.netbox.netbox_device:
         data:

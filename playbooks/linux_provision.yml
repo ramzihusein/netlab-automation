@@ -11,11 +11,15 @@
 #          and every built server's IP and instance ID go back into its
 #          record, which marks it Installed. Inventory "Linux Servers" reads
 #          the Installed records. A rebuild keeps the same records.
+#          NetBox owns the addresses: a new server gets the next free IP in
+#          the NetBox range "Linux demo servers" (tagged netlab-linux, with
+#          its DNS name), keeps it across rebuilds, and gives it back when
+#          the CMDB retires the server.
 #          With rebuild=yes (survey) the old servers are terminated first,
 #          for a clean demo with a real patch backlog.
 #          Without a ServiceNow credential it builds vars/linux/servers.yml.
 #
-# Required AAP Credentials: "AWS Creds", "NetLab ServiceNow"
+# Required AAP Credentials: "AWS Creds", "NetLab ServiceNow", "NetLab NetBox"
 # Required AAP Variables (set in Job Template): same as NetLab - Provision Infra
 #   vpc_id, subnet_id, key_pair_name, aap_security_group_ids, route53_zone_id,
 #   admin_cidrs
@@ -34,12 +38,25 @@
     instance_type: t3.small
     ubuntu_ami_param: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
     use_cmdb: "{{ lookup('env', 'SN_HOST') | length > 0 }}"
+    server_tag: netlab-linux
+    lookup_args: {api_endpoint: "{{ netbox_url }}", token: "{{ netbox_token }}", raw_data: true}
+    subnet_bits: "{{ linux_server_range.start_address | ansible.utils.ipaddr('prefix') }}"
     common_tags:
       Project: netlab-linux
       ManagedBy: ansible
       # Stopped with AAP every evening by the AWS power schedule; this job
       # starts them again.
       PowerSchedule: stop-only
+
+  module_defaults:
+    group/netbox.netbox.netbox:
+      netbox_url: "{{ netbox_url }}"
+      netbox_token: "{{ netbox_token }}"
+    ansible.builtin.uri:
+      headers:
+        Authorization: "Token {{ netbox_token }}"
+        Accept: application/json
+      body_format: json
 
   tasks:
 
@@ -87,6 +104,96 @@
              ~ (cmdb_os.values() | map(attribute='os_version') | join(', ')) }}
         quiet: true
 
+    - name: Find the servers already built (running or stopped)
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+        filters:
+          "tag:Project": netlab-linux
+          instance-state-name: [pending, running, stopping, stopped]
+      register: existing
+
+    # ------------------------------------------- addresses come from NetBox
+    - name: NetBox tag for the servers' addresses
+      netbox.netbox.netbox_tag:
+        data:
+          name: "{{ server_tag }}"
+          description: Linux demo server addresses (assigned by AAP)
+
+    - name: Read the servers' addresses and address range from NetBox
+      ansible.builtin.set_fact:
+        nb_addresses: "{{ query('netbox.netbox.nb_lookup', 'ip-addresses', api_filter='tag=' ~ server_tag, **lookup_args) }}"
+        nb_range: "{{ query('netbox.netbox.nb_lookup', 'ip-ranges', **lookup_args)
+                      | selectattr('start_address', 'equalto', linux_server_range.start_address) | first | default({}) }}"
+        built: "{{ dict(existing.instances | map(attribute='tags.Name') | zip(existing.instances | map(attribute='private_ip_address'))) }}"
+
+    - name: Check NetBox has the address range
+      ansible.builtin.assert:
+        that: nb_range | length > 0
+        fail_msg: >-
+          NetBox has no IP range starting at {{ linux_server_range.start_address }}:
+          run "NetLab - Populate NetBox" (it adds the Linux demo servers' range).
+        quiet: true
+
+    - name: Record the address of servers built before NetBox assigned one
+      netbox.netbox.netbox_ip_address:
+        data:
+          address: "{{ built[item.name] }}/{{ subnet_bits }}"
+          dns_name: "{{ item.name }}.{{ dns_zone }}"
+          description: "{{ item.name }}: Linux demo {{ item.role }} server"
+          status: active
+          tags: ["{{ server_tag }}"]
+      loop: "{{ servers }}"
+      loop_control:
+        label: "{{ item.name }} -> {{ built[item.name] | default('') }}"
+      when:
+        - item.name ~ '.' ~ dns_zone not in nb_addresses | map(attribute='dns_name')
+        - item.name in built
+
+    # The NetBox API hands out the next free IP in the range and records it
+    # in the same call.
+    - name: Take the next free address from NetBox for new servers
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/ip-ranges/{{ nb_range.id }}/available-ips/"
+        method: POST
+        body:
+          dns_name: "{{ item.name }}.{{ dns_zone }}"
+          description: "{{ item.name }}: Linux demo {{ item.role }} server"
+          status: active
+          tags: [{slug: "{{ server_tag }}"}]
+        status_code: 201
+      loop: "{{ servers }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when:
+        - item.name ~ '.' ~ dns_zone not in nb_addresses | map(attribute='dns_name')
+        - item.name not in built
+
+    - name: Give back the addresses of servers the CMDB no longer lists
+      netbox.netbox.netbox_ip_address:
+        data:
+          address: "{{ item.address }}"
+        state: absent
+      loop: "{{ nb_addresses }}"
+      loop_control:
+        label: "{{ item.dns_name }} {{ item.address }}"
+      when: item.dns_name.split('.') | first not in servers | map(attribute='name')
+
+    - name: Each server's address, as NetBox has it now
+      ansible.builtin.set_fact:
+        server_ip: "{{ dict(addresses | map(attribute='dns_name') | map('split', '.') | map('first')
+                            | zip(addresses | map(attribute='address') | map('ansible.utils.ipaddr', 'address'))) }}"
+      vars:
+        addresses: "{{ query('netbox.netbox.nb_lookup', 'ip-addresses', api_filter='tag=' ~ server_tag, **lookup_args) }}"
+
+    - name: Servers whose address no longer matches NetBox
+      ansible.builtin.debug:
+        msg: "{{ item.key }} runs on {{ item.value }}, NetBox says {{ server_ip[item.key] }}: rebuild to move it"
+      loop: "{{ built | dict2items | selectattr('key', 'in', server_ip) | list }}"
+      loop_control:
+        label: "{{ item.key }}"
+      when: server_ip[item.key] != item.value
+
+    # ------------------------------------------------------------------- AWS
     - name: Find the newest RHEL 9 image (Red Hat's own, pay-as-you-go)
       amazon.aws.ec2_ami_info:
         region: "{{ aws_region }}"
@@ -116,15 +223,7 @@
         tags: "{{ common_tags | combine({'Name': 'netlab-linux-sg'}) }}"
       register: linux_sg
 
-    - name: Find servers the CMDB no longer lists (retired or deleted)
-      amazon.aws.ec2_instance_info:
-        region: "{{ aws_region }}"
-        filters:
-          "tag:Project": netlab-linux
-          instance-state-name: [pending, running, stopping, stopped]
-      register: existing
-
-    - name: Remove them
+    - name: Remove the servers the CMDB no longer lists (retired or deleted)
       when: leftovers | length > 0
       vars:
         leftovers: "{{ existing.instances | rejectattr('tags.Name', 'in', servers | map(attribute='name') | list) | list }}"
@@ -180,6 +279,7 @@
         security_groups: ["{{ linux_sg.group_id }}"]
         network:
           assign_public_ip: true
+          private_ip_address: "{{ server_ip[item.name] }}"
         volumes:
           - device_name: /dev/sda1      # root disk on both images
             ebs:
@@ -196,7 +296,7 @@
         state: running
       loop: "{{ servers }}"
       loop_control:
-        label: "{{ item.name }} ({{ item.os }}, {{ item.role }})"
+        label: "{{ item.name }} ({{ item.os }}, {{ item.role }}, {{ server_ip[item.name] }})"
       register: launched
 
     - name: Re-read the servers for their final addresses

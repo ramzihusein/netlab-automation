@@ -253,8 +253,8 @@ def hub_registry(org_id, login_ct):
     ensure(f"{C}/execution_environments/", LINUX_EE, {
         "organization": org_id, "image": f"{HUB_PULL_REGISTRY}/linux-ee:latest", "pull": "always",
         "credential": pull["id"],
-        "description": "Supported EE + community.general, community.crypto, containers.podman "
-                       "(execution-environments/linux-ee)",
+        "description": "Supported EE + community.general, community.crypto, containers.podman, "
+                       "netbox.netbox, servicenow.itsm (execution-environments/linux-ee)",
     })
     return push, ee
 
@@ -765,7 +765,7 @@ def linux_side(org_id, proj, creds, sn_cred=None):
                                           "route53_zone_id", "admin_cidrs")}
     servers = inv["id"]
     specs = [
-        ("Linux - Provision / Start Servers", "playbooks/linux_provision.yml", local, ["aws", "servicenow"],
+        ("Linux - Provision / Start Servers", "playbooks/linux_provision.yml", local, ["aws", "servicenow", "netbox"],
          {"extra_vars": yaml_vars(pv), "survey_enabled": True}),
         ("Linux - Request Server in CMDB", "playbooks/servicenow_request_server.yml", local, ["servicenow"],
          {"survey_enabled": True}),

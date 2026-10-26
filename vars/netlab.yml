@@ -8,6 +8,23 @@ netlab_tag: netlab
 dns_zone: aap.ramzidev.com
 
 # ---------------------------------------------------------------------------
+# AWS addressing, recorded in NetBox (the source of truth for every IP).
+# The Linux demo servers take their private IPs from the NetBox IP range
+# below: Linux - Provision / Start Servers asks NetBox for the next free one.
+# The same addresses are reserved in the AWS subnet ("explicit" subnet CIDR
+# reservation), so AWS never hands them to anything else:
+#   aws ec2 create-subnet-cidr-reservation --subnet-id <subnet_id> \
+#     --cidr 10.0.1.32/27 --reservation-type explicit --description "NetBox: Linux demo servers"
+# ---------------------------------------------------------------------------
+aws_prefixes:
+  - {prefix: 10.0.0.0/16, status: container, description: AAP VPC (AWS us-east-2)}
+  - {prefix: 10.0.1.0/24, status: active, description: AWS subnet aap-demo-public-a}
+linux_server_range:
+  start_address: 10.0.1.33/24
+  end_address: 10.0.1.62/24
+  description: Linux demo servers (AAP takes the next free IP)
+
+# ---------------------------------------------------------------------------
 # Containerlab management network
 # Routed from the VPC to the lab host (VPC route -> lab host ENI), so it must
 # not overlap the VPC CIDR (10.0.0.0/16).

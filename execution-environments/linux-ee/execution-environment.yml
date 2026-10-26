@@ -6,6 +6,8 @@
 #   - community.general   ufw, timezone, and many other everyday modules
 #   - community.crypto    certificates and keys
 #   - containers.podman   running containers on the servers
+#   - netbox.netbox       server builds take their IP addresses from NetBox
+#   - servicenow.itsm     the CMDB owns the server list
 #
 # Built and pushed to the private automation hub by playbooks/09_build_ee.yml
 # (job "NetLab - Build Execution Environment", survey: linux-ee):
@@ -22,6 +24,7 @@ dependencies:
   # ansible-core and ansible-runner are left out on purpose: the supported
   # base image already has the versions Red Hat supports.
   galaxy: requirements.yml
+  python: requirements.txt
   # The base image runs ansible on Python 3.12. Say so explicitly: builder
   # otherwise uses /usr/bin/python3, which the RHEL packages below repoint.
   python_interpreter:
@@ -55,4 +58,4 @@ options:
 additional_build_steps:
   append_final:
     - LABEL org.opencontainers.image.source="https://github.com/ramzihusein/netlab-automation"
-    - LABEL org.opencontainers.image.description="AAP 2.6 supported EE + community.general, community.crypto, containers.podman"
+    - LABEL org.opencontainers.image.description="AAP 2.6 supported EE + community.general, community.crypto, containers.podman, netbox.netbox, servicenow.itsm"

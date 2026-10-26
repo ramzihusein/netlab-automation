@@ -405,6 +405,11 @@ distribution in OS Version; see `vars/linux/servers.yml`):
    removes servers whose record is Retired (or gone), and writes the IP, FQDN
    and EC2 instance ID back to the record, which marks it Installed. A rebuild
    updates the same records; it never creates duplicates.
+   **NetBox owns the addresses**: a new server gets the next free IP from
+   the NetBox IP range "Linux demo servers" (10.0.1.33-62, seeded by Populate
+   NetBox and reserved in the AWS subnet), recorded with its DNS name and tag
+   `netlab-linux`. It keeps that IP across rebuilds; retiring the server gives
+   it back.
 3. The inventory **Linux Servers** (`inventories/linux_servers.now.yml`, the
    `servicenow.itsm.now` plugin) lists the Installed records and groups them:
    `web`, `db`, `rhel`, `ubuntu`.
