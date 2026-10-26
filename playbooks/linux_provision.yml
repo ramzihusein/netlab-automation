@@ -1,16 +1,21 @@
 ---
 # Job Template: Linux - Provision / Start Servers
-# Purpose: Creates (or starts, if stopped) the Linux demo servers in the AAP
-#          VPC and publishes their DNS names. With rebuild=yes (survey) the
-#          old servers are terminated first, for a clean demo with a real
-#          patch backlog:
+# Purpose: Builds (or starts, if stopped) the Linux demo servers the
+#          ServiceNow CMDB lists, in the AAP VPC, and publishes their DNS
+#          names. The standard fleet:
 #            web1  RHEL 9         web server
 #            web2  Ubuntu 24.04   web server (same playbooks, other distro)
 #            db1   RHEL 9         database server
-#          Inventory "Linux Servers" finds them by tag Project=netlab-linux
-#          and groups them by tag Role (web, db) and OS (rhel, ubuntu).
+#          The CMDB owns the list (Linux - Request Server in CMDB): a new
+#          record (Pending Install) gets built, a Retired one gets removed,
+#          and every built server's IP and instance ID go back into its
+#          record, which marks it Installed. Inventory "Linux Servers" reads
+#          the Installed records. A rebuild keeps the same records.
+#          With rebuild=yes (survey) the old servers are terminated first,
+#          for a clean demo with a real patch backlog.
+#          Without a ServiceNow credential it builds vars/linux/servers.yml.
 #
-# Required AAP Credentials: "AWS Creds"
+# Required AAP Credentials: "AWS Creds", "NetLab ServiceNow"
 # Required AAP Variables (set in Job Template): same as NetLab - Provision Infra
 #   vpc_id, subnet_id, key_pair_name, aap_security_group_ids, route53_zone_id,
 #   admin_cidrs
@@ -22,15 +27,13 @@
 
   vars_files:
     - ../vars/netlab.yml
+    - ../vars/linux/servers.yml
 
   vars:
     rebuild: "no"
     instance_type: t3.small
     ubuntu_ami_param: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
-    servers:
-      - {name: web1, os: rhel, role: web}
-      - {name: web2, os: ubuntu, role: web}
-      - {name: db1, os: rhel, role: db}
+    use_cmdb: "{{ lookup('env', 'SN_HOST') | length > 0 }}"
     common_tags:
       Project: netlab-linux
       ManagedBy: ansible
@@ -39,6 +42,48 @@
       PowerSchedule: stop-only
 
   tasks:
+
+    - name: Read the servers from the CMDB
+      when: use_cmdb
+      block:
+        - name: Our server records
+          servicenow.itsm.configuration_item_info:
+            sys_class_name: "{{ cmdb_server_class }}"
+            sysparm_query: "short_description={{ cmdb_server_marker }}"
+          register: cmdb
+
+        - name: Servers the CMDB wants (everything not Retired)
+          ansible.builtin.set_fact:
+            servers: "{{ servers | default([]) + [{'name': item.name, 'os': os_by_cmdb.get(item.os, item.os),
+                                                   'role': item.subcategory, 'sys_id': item.sys_id}] }}"
+          loop: "{{ cmdb.records | rejectattr('install_status', 'equalto', 'retired') | list }}"
+          loop_control:
+            label: "{{ item.name }} ({{ item.os }}, {{ item.subcategory }}, {{ item.install_status }})"
+          vars:
+            os_by_cmdb: "{{ cmdb_os | dict2items | items2dict(key_name='value', value_name='key') }}"
+
+        - name: Servers the CMDB has retired
+          ansible.builtin.set_fact:
+            servers: "{{ servers | default([]) }}"
+            retired: "{{ cmdb.records | selectattr('install_status', 'equalto', 'retired') | list }}"
+
+    - name: Without ServiceNow, build the standard fleet
+      ansible.builtin.set_fact:
+        servers: "{{ standard_servers }}"
+        retired: []
+      when: not use_cmdb
+
+    - name: Check the server list
+      ansible.builtin.assert:
+        that:
+          - servers | length > 0
+          - servers | rejectattr('os', 'in', cmdb_os) | list | length == 0
+        fail_msg: >-
+          {{ 'The CMDB lists no NetLab servers: run Linux - Request Server in CMDB first.'
+             if servers | length == 0 else
+             'Unknown OS on ' ~ (servers | rejectattr('os', 'in', cmdb_os) | map(attribute='name') | join(', '))
+             ~ ': the CMDB Operating System must be one of ' ~ (cmdb_os.values() | join(', ')) }}
+        quiet: true
 
     - name: Find the newest RHEL 9 image (Red Hat's own, pay-as-you-go)
       amazon.aws.ec2_ami_info:
@@ -68,6 +113,49 @@
           }}
         tags: "{{ common_tags | combine({'Name': 'netlab-linux-sg'}) }}"
       register: linux_sg
+
+    - name: Find servers the CMDB no longer lists (retired or deleted)
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+        filters:
+          "tag:Project": netlab-linux
+          instance-state-name: [pending, running, stopping, stopped]
+      register: existing
+
+    - name: Remove them
+      when: leftovers | length > 0
+      vars:
+        leftovers: "{{ existing.instances | rejectattr('tags.Name', 'in', servers | map(attribute='name') | list) | list }}"
+      block:
+        - name: Terminate
+          amazon.aws.ec2_instance:
+            region: "{{ aws_region }}"
+            instance_ids: "{{ leftovers | map(attribute='instance_id') | list }}"
+            state: absent
+            wait: true
+
+        - name: Look up their DNS names
+          amazon.aws.route53:
+            hosted_zone_id: "{{ route53_zone_id }}"
+            record: "{{ item.tags.Name }}.{{ dns_zone }}"
+            type: A
+            state: get
+          loop: "{{ leftovers }}"
+          loop_control:
+            label: "{{ item.tags.Name }}.{{ dns_zone }}"
+          register: old_dns
+
+        - name: Delete their DNS names
+          amazon.aws.route53:
+            hosted_zone_id: "{{ route53_zone_id }}"
+            record: "{{ item.set.record }}"
+            type: A
+            ttl: "{{ item.set.ttl }}"
+            value: "{{ item.set['values'] }}"
+            state: absent
+          loop: "{{ old_dns.results | selectattr('set.record', 'defined') | list }}"
+          loop_control:
+            label: "{{ item.set.record | default('') }}"
 
     - name: Terminate the old servers (rebuild)
       amazon.aws.ec2_instance:
@@ -139,6 +227,36 @@
       loop: "{{ running.instances }}"
       loop_control:
         label: "{{ item.tags.Name }}"
+
+    - name: Write the build back to the CMDB (Installed, IP, instance ID)
+      servicenow.itsm.configuration_item:
+        sys_id: "{{ server.sys_id }}"
+        sys_class_name: "{{ cmdb_server_class }}"
+        ip_address: "{{ item.private_ip_address }}"
+        install_status: installed
+        operational_status: operational
+        other:
+          host_name: "{{ item.tags.Name }}"
+          fqdn: "{{ item.tags.Name }}.{{ dns_zone }}"
+          object_id: "{{ item.instance_id }}"
+      vars:
+        server: "{{ servers | selectattr('name', 'equalto', item.tags.Name) | first }}"
+      loop: "{{ running.instances }}"
+      loop_control:
+        label: "{{ item.tags.Name }} -> {{ item.private_ip_address }}"
+      when: use_cmdb
+
+    - name: Mark retired servers' records as gone
+      servicenow.itsm.configuration_item:
+        sys_id: "{{ item.sys_id }}"
+        sys_class_name: "{{ cmdb_server_class }}"
+        operational_status: retired
+        ip_address: ""
+        other:
+          object_id: ""
+      loop: "{{ retired }}"
+      loop_control:
+        label: "{{ item.name }}"
 
     - name: Summary
       ansible.builtin.debug:

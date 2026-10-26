@@ -1,0 +1,27 @@
+---
+# AAP inventory source "Linux CMDB" (sourced from project), inventory "Linux Servers".
+# The ServiceNow CMDB owns the Linux servers: a server is in this inventory
+# because it has a record there, not because it happens to run in AWS.
+# Instance URL and login come from the "NetLab ServiceNow" credential
+# (SN_HOST / SN_USERNAME / SN_PASSWORD). The file name must end in now.yml.
+#
+# CMDB conventions (see vars/linux/servers.yml):
+#   short_description  "NetLab demo server"  marks our records; the developer
+#                                            instance ships hundreds of fake ones
+#   subcategory        web / db              server role -> groups web, db
+#   os                 Linux Red Hat / Linux Ubuntu      -> groups rhel, ubuntu
+#   install_status     Installed             only built servers are listed
+#   ip_address         private IP, written by Linux - Provision / Start Servers
+plugin: servicenow.itsm.now
+table: cmdb_ci_linux_server
+sysparm_query: short_description=NetLab demo server^install_status=1
+columns: [name, ip_address, fqdn, os, os_version, subcategory, object_id, used_for]
+keyed_groups:
+  - key: subcategory
+    separator: ""
+groups:
+  rhel: os == "Linux Red Hat"
+  ubuntu: os == "Linux Ubuntu"
+compose:
+  ansible_host: ip_address
+  ansible_user: "'ec2-user' if os == 'Linux Red Hat' else 'ubuntu'"

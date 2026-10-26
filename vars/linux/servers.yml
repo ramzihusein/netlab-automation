@@ -1,0 +1,26 @@
+---
+# The Linux demo servers, as the ServiceNow CMDB describes them.
+#
+# The CMDB is the source of truth for servers: Linux - Request Server in CMDB
+# adds a record (Pending Install), Linux - Provision / Start Servers builds
+# whatever the CMDB lists and writes the IP and instance ID back, and the
+# inventory "Linux Servers" is read from the CMDB.
+
+# The standard fleet. Linux - Request Server in CMDB with no server name
+# registers these (only the ones not already in the CMDB). Without a
+# ServiceNow credential, Provision builds this list directly.
+standard_servers:
+  - {name: web1, os: rhel, role: web}
+  - {name: web2, os: ubuntu, role: web}
+  - {name: db1, os: rhel, role: db}
+
+# How the records look in the CMDB.
+cmdb_server_class: cmdb_ci_linux_server
+# Marks our records; the developer instance ships hundreds of fake servers.
+cmdb_server_marker: NetLab demo server
+# OS -> CMDB "Operating System" (os) value, and back.
+cmdb_os:
+  rhel: Linux Red Hat
+  ubuntu: Linux Ubuntu
+# The role goes in the CMDB "Subcategory" field.
+server_roles: [web, db]

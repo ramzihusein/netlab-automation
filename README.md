@@ -395,9 +395,22 @@ Three EC2 servers in the same VPC, managed from AAP on the **Linux EE**:
 - `web2`: Ubuntu 24.04, web server.
 - `db1`: RHEL 9, database server.
 
-They're created by **Linux - Provision / Start Servers** and found by the
-inventory **Linux Servers** (EC2 tag `Project=netlab-linux`). The inventory
-groups them by tag: `web`, `db`, `rhel`, `ubuntu`.
+The **ServiceNow CMDB** owns the server list (`cmdb_ci_linux_server`
+records with short description `NetLab demo server`; role in Subcategory,
+OS in Operating System; see `vars/linux/servers.yml`):
+1. **Linux - Request Server in CMDB** creates the record (Pending Install). Leave
+   the name empty to register the standard fleet. Adding a record by hand in
+   ServiceNow works the same way.
+2. **Linux - Provision / Start Servers** builds whatever the CMDB lists,
+   removes servers whose record is Retired (or gone), and writes the IP, FQDN
+   and EC2 instance ID back to the record, which marks it Installed. A rebuild
+   updates the same records; it never creates duplicates.
+3. The inventory **Linux Servers** (`inventories/linux_servers.now.yml`, the
+   `servicenow.itsm.now` plugin) lists the Installed records and groups them:
+   `web`, `db`, `rhel`, `ubuntu`.
+
+Without a ServiceNow credential, the bootstrap falls back to the EC2 tag
+inventory (`Project=netlab-linux`) and Provision builds the standard fleet.
 
 Like NetLab, they're stopped at 19:00 by the power schedule. Start them again
 with the provision job or the fleet workflow.
@@ -407,6 +420,7 @@ both distribution families:
 
 | Job template | Playbook | Shows |
 |---|---|---|
+| Linux - Request Server in CMDB | `servicenow_request_server.yml` | The CMDB comes first: request (or retire) a server. Survey: name, OS, role. The next Provision run builds or removes it. |
 | Linux - Build Server Fleet (workflow) | — | Provision → packages → users → baseline → RHEL System Roles → web app → report, ~5 min. Survey "brand-new servers?" = yes terminates and rebuilds them first. |
 | Linux - Server Inventory Report | `linux_report.yml` | Facts: OS, kernel, uptime, size, disk, SELinux, for every server, read-only |
 | Linux - Manage Users | `linux_users.yml` + `vars/linux/users.yml` | Groups, accounts, SSH keys, sudo (validated with `visudo`). Offboard someone by setting `state: absent`. |

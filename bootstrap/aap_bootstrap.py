@@ -706,33 +706,57 @@ def servicenow_side(org_id, proj, netlab_ee_id, devices_inv_id):
     return cred
 
 
-def linux_side(org_id, proj, creds):
+def linux_side(org_id, proj, creds, sn_cred=None):
     """Linux configuration management demo: servers web1/web2/db1 (EC2), their
-    inventory, and the job templates, all on the Linux EE."""
+    inventory, and the job templates, all on the Linux EE.
+
+    With a ServiceNow credential the CMDB owns the servers: the inventory is
+    read from it and Provision builds what it lists. Without one, the
+    inventory is read from EC2 tags."""
     print("Linux demo")
-    inv, _ = ensure(f"{C}/inventories/", "Linux Servers", {
-        "organization": org_id, "description": "Linux demo servers (EC2 tag Project=netlab-linux)"})
-    ensure(f"{C}/inventory_sources/", "Linux EC2", {
-        "inventory": inv["id"], "source": "ec2", "credential": creds["aws"],
-        "overwrite": True, "update_on_launch": True, "update_cache_timeout": 0,
-        "source_vars": yaml_vars({
-            "regions": ["us-east-2"],
-            "filters": {"tag:Project": "netlab-linux", "instance-state-name": "running"},
-            "hostnames": ["tag:Name"],
-            # Groups named after the tag values: web, db, rhel, ubuntu.
-            "keyed_groups": [{"key": "tags.Role", "separator": ""}, {"key": "tags.OS", "separator": ""}],
-            "compose": {"ansible_host": "private_ip_address",
-                        "ansible_user": "'ec2-user' if tags.OS == 'rhel' else 'ubuntu'"},
-        }),
-    }, inventory=inv["id"])
     linux_ee = find(f"{C}/execution_environments/", LINUX_EE)["id"]
+    source_from = "the ServiceNow CMDB" if sn_cred else "EC2 tag Project=netlab-linux"
+    inv, _ = ensure(f"{C}/inventories/", "Linux Servers", {
+        "organization": org_id, "description": f"Linux demo servers ({source_from})"})
+    sources = {
+        "Linux EC2": {
+            "source": "ec2", "credential": creds["aws"],
+            "source_vars": yaml_vars({
+                "regions": ["us-east-2"],
+                "filters": {"tag:Project": "netlab-linux", "instance-state-name": "running"},
+                "hostnames": ["tag:Name"],
+                # Groups named after the tag values: web, db, rhel, ubuntu.
+                "keyed_groups": [{"key": "tags.Role", "separator": ""}, {"key": "tags.OS", "separator": ""}],
+                "compose": {"ansible_host": "private_ip_address",
+                            "ansible_user": "'ec2-user' if tags.OS == 'rhel' else 'ubuntu'"},
+            }),
+        },
+        # Same hosts and groups, from the CMDB records.
+        "Linux CMDB": {
+            "source": "scm", "source_project": proj["id"], "execution_environment": linux_ee,
+            "source_path": "inventories/linux_servers.now.yml",
+            "credential": sn_cred["id"] if sn_cred else None,
+        },
+    }
+    use = "Linux CMDB" if sn_cred else "Linux EC2"
+    ensure(f"{C}/inventory_sources/", use, dict(sources[use], **{
+        "inventory": inv["id"], "overwrite": True, "update_on_launch": True, "update_cache_timeout": 0,
+    }), inventory=inv["id"])
+    # One source only: two would each own the same host names.
+    for other in set(sources) - {use}:
+        old = find(f"{C}/inventory_sources/", other, inventory=inv["id"])
+        if old:
+            api("DELETE", f"{C}/inventory_sources/{old['id']}/")
+            print(f"  - inventory_sources: {other}")
     local = find(f"{C}/inventories/", LOCAL_INVENTORY)["id"]
     pv = {k: PROVISION_VARS[k] for k in ("vpc_id", "subnet_id", "key_pair_name", "aap_security_group_ids",
                                           "route53_zone_id", "admin_cidrs")}
     servers = inv["id"]
     specs = [
-        ("Linux - Provision / Start Servers", "playbooks/linux_provision.yml", local, ["aws"],
+        ("Linux - Provision / Start Servers", "playbooks/linux_provision.yml", local, ["aws", "servicenow"],
          {"extra_vars": yaml_vars(pv), "survey_enabled": True}),
+        ("Linux - Request Server in CMDB", "playbooks/servicenow_request_server.yml", local, ["servicenow"],
+         {"survey_enabled": True}),
         ("Linux - Server Inventory Report", "playbooks/linux_report.yml", servers, ["ssh"],
          {"ask_limit_on_launch": True}),
         ("Linux - Manage Users", "playbooks/linux_users.yml", servers, ["ssh"],
@@ -753,6 +777,9 @@ def linux_side(org_id, proj, creds):
         ("Linux - Manage a Service", "playbooks/linux_service.yml", servers, ["ssh"],
          {"survey_enabled": True, "ask_limit_on_launch": True}),
     ]
+    creds = dict(creds, servicenow=sn_cred["id"] if sn_cred else None)
+    if not sn_cred:
+        specs = [spec for spec in specs if spec[0] != "Linux - Request Server in CMDB"]
     jts = {}
     for name, playbook, inventory, cred_keys, extra in specs:
         jt, _ = ensure(f"{C}/job_templates/", name, dict({
@@ -762,7 +789,7 @@ def linux_side(org_id, proj, creds):
         }, **extra))
         have = {c["id"] for c in api("GET", f"{C}/job_templates/{jt['id']}/credentials/")["results"]}
         for key in cred_keys:
-            if creds[key] not in have:
+            if creds[key] and creds[key] not in have:
                 api("POST", f"{C}/job_templates/{jt['id']}/credentials/", {"id": creds[key]})
         jts[name] = jt
 
@@ -777,6 +804,17 @@ def linux_side(org_id, proj, creds):
     rebuild_q = choice("Start from brand-new servers?", "rebuild", ["no", "yes"], "no",
                        "yes = terminate web1/web2/db1 and build fresh ones from the RHEL/Ubuntu images")
     survey("Linux - Provision / Start Servers", "Servers", [rebuild_q])
+    if sn_cred:
+        survey("Linux - Request Server in CMDB", "Server", [
+            {"question_name": "Server name (empty = the standard fleet web1, web2, db1)",
+             "variable": "server_name", "type": "text", "default": "", "required": False,
+             "question_description": "Lower case, e.g. web3"},
+            choice("Operating system", "server_os", ["rhel", "ubuntu"], "rhel"),
+            choice("Role", "server_role", ["web", "db"], "web"),
+            choice("Request or retire", "request_action", ["request", "retire"], "request",
+                   "request = new CMDB record (Pending Install); retire = mark it Retired. "
+                   "Provision / Start Servers then builds or removes it."),
+        ])
     survey("Linux - Install Packages", "Packages", [
         {"question_name": "Extra packages (comma separated, optional)", "variable": "extra_packages",
          "type": "text", "default": "", "required": False,
@@ -1077,8 +1115,8 @@ def main():
     wf = workflow(org_id, jts)
     vlan_wf = vlan_workflow(org_id, jts)
     remediate_workflow(org_id, jts)
-    linux_side(org_id, proj, creds)
-    servicenow_side(org_id, proj, netlab_ee["id"], devices["id"])
+    sn_cred = servicenow_side(org_id, proj, netlab_ee["id"], devices["id"])
+    linux_side(org_id, proj, creds, sn_cred)
     rbac(jts, [vlan_wf["id"]], inv, a.secrets_out)
     if not a.skip_eda:
         print("EDA project + rulebook activations")

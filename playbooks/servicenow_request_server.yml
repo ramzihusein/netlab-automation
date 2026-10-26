@@ -1,0 +1,96 @@
+---
+# Job Template: Linux - Request Server in CMDB
+# Purpose: The CMDB comes first. Requesting a server only creates its
+#          ServiceNow CMDB record (status Pending Install); the next
+#          Linux - Provision / Start Servers (or Build Server Fleet) run
+#          builds it. Retiring marks the record Retired and the next
+#          Provision run removes the server. Stands in for a ServiceNow
+#          catalog request until the catalog is wired up; editing the
+#          records by hand in ServiceNow works exactly the same.
+#
+# Survey: server name (empty = the standard fleet web1, web2, db1), OS,
+#         role, request / retire
+# Required AAP Credentials: "NetLab ServiceNow"
+
+- name: Request or retire a Linux server in the ServiceNow CMDB
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../vars/linux/servers.yml
+
+  vars:
+    server_name: ""
+    server_os: rhel
+    server_role: web
+    request_action: request
+    requested: >-
+      {{ [{'name': server_name | trim | lower, 'os': server_os, 'role': server_role}]
+         if server_name | trim | length > 0 else standard_servers }}
+
+  tasks:
+
+    - name: Check the request
+      ansible.builtin.assert:
+        that:
+          - item.name is match('^[a-z][a-z0-9-]{0,30}$')
+          - item.os in cmdb_os
+          - item.role in server_roles
+          - request_action == 'request' or server_name | trim | length > 0
+        fail_msg: >-
+          Server names are lower case letters, digits and dashes; OS one of
+          {{ cmdb_os | list }}; role one of {{ server_roles }}. Retire needs a server name.
+        quiet: true
+      loop: "{{ requested }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Read our server records from the CMDB
+      servicenow.itsm.configuration_item_info:
+        sys_class_name: "{{ cmdb_server_class }}"
+        sysparm_query: "short_description={{ cmdb_server_marker }}"
+      register: cmdb
+
+    - name: Request the servers (new record, or a retired one brought back)
+      servicenow.itsm.configuration_item:
+        name: "{{ item.name }}"
+        sys_class_name: "{{ cmdb_server_class }}"
+        short_description: "{{ cmdb_server_marker }}"
+        install_status: pending_install
+        operational_status: non_operational
+        other:
+          os: "{{ cmdb_os[item.os] }}"
+          subcategory: "{{ item.role }}"
+      loop: "{{ requested }}"
+      loop_control:
+        label: "{{ item.name }} ({{ item.os }}, {{ item.role }})"
+      # A record that's already active belongs to the CMDB; leave it alone.
+      when:
+        - request_action == 'request'
+        - item.name not in (cmdb.records | rejectattr('install_status', 'equalto', 'retired') | map(attribute='name'))
+
+    - name: Retire the server
+      when: request_action == 'retire'
+      vars:
+        matches: "{{ cmdb.records | selectattr('name', 'equalto', server_name | trim | lower) | list }}"
+      block:
+        - name: Check it's one of ours
+          ansible.builtin.assert:
+            that: matches | length == 1
+            fail_msg: "{{ server_name }} isn't a NetLab server in the CMDB"
+            quiet: true
+
+        - name: Mark it Retired
+          servicenow.itsm.configuration_item:
+            sys_id: "{{ matches[0].sys_id }}"
+            sys_class_name: "{{ cmdb_server_class }}"
+            install_status: retired
+
+    - name: What happens next
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'Requested' if request_action == 'request' else 'Retired' }}
+          {{ requested | map(attribute='name') | join(', ') }} in the CMDB.
+          Run "Linux - Provision / Start Servers" (or the Build Server Fleet
+          workflow) to {{ 'build' if request_action == 'request' else 'remove' }} it.
