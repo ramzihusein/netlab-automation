@@ -124,7 +124,11 @@
         nb_addresses: "{{ query('netbox.netbox.nb_lookup', 'ip-addresses', api_filter='tag=' ~ server_tag, **lookup_args) }}"
         nb_range: "{{ query('netbox.netbox.nb_lookup', 'ip-ranges', **lookup_args)
                       | selectattr('start_address', 'equalto', linux_server_range.start_address) | first | default({}) }}"
-        built: "{{ dict(existing.instances | map(attribute='tags.Name') | zip(existing.instances | map(attribute='private_ip_address'))) }}"
+        # Servers running now, and their addresses. A rebuild replaces them, so
+        # it doesn't count them: a server NetBox doesn't know yet gets a fresh
+        # address from the range.
+        built: "{{ {} if rebuild | bool else
+                   dict(existing.instances | map(attribute='tags.Name') | zip(existing.instances | map(attribute='private_ip_address'))) }}"
 
     - name: Check NetBox has the address range
       ansible.builtin.assert:
