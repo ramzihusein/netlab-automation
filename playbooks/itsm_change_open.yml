@@ -77,6 +77,7 @@
         - name: Send it for approval (Assess)
           servicenow.itsm.change_request:
             number: "{{ change.record.number }}"
+            assignment_group: "{{ change_assignment_group }}"   # the module wants it on every state change
             state: assess
 
         - name: Tell the team it's waiting
@@ -111,6 +112,7 @@
         - name: Cancel the change
           servicenow.itsm.change_request:
             number: "{{ change.record.number }}"
+            assignment_group: "{{ change_assignment_group }}"   # the module wants it on every state change
             state: canceled
             other:
               work_notes: "Not approved in time, or rejected. Nothing was changed. AAP: {{ workflow_link }}"
@@ -132,6 +134,7 @@
     - name: Start the work (Implement)
       servicenow.itsm.change_request:
         number: "{{ change.record.number }}"
+        assignment_group: "{{ change_assignment_group }}"   # the module wants it on every state change
         state: implement
         other:
           work_notes: "Approved. AAP is starting the work: {{ workflow_link }}"

@@ -36,6 +36,7 @@
     - name: Record the results
       servicenow.itsm.change_request:
         number: "{{ change_number }}"
+        assignment_group: "{{ change_assignment_group }}"   # the module wants it on every state change
         state: review
         other:
           work_notes: |-
@@ -46,6 +47,7 @@
     - name: Close it as {{ change_outcome }}
       servicenow.itsm.change_request:
         number: "{{ change_number }}"
+        assignment_group: "{{ change_assignment_group }}"   # the module wants it on every state change
         state: closed
         close_code: "{{ change_outcome }}"
         close_notes: >-
