@@ -1,0 +1,36 @@
+---
+# Who has access to the Windows servers, as data.
+# Used by playbooks/windows_users.yml (Windows - Manage Users).
+#
+# Onboarding = add an entry. Offboarding = set state: absent (the account and
+# its profile are removed everywhere). Commit and run the job.
+# New accounts get a random password nobody knows: in real life they'd come
+# from Active Directory or a password vault.
+
+# Local groups, and the built-in groups they're members of
+user_groups:
+  - name: NetLab Ops
+    description: Operations (full admin)
+    member_of: [Administrators]
+  - name: NetLab Developers
+    description: Developers (remote desktop, no admin)
+    member_of: [Remote Desktop Users]
+
+users:
+  - name: alice
+    fullname: Alice Ahmed
+    description: Operations
+    groups: [NetLab Ops]
+    state: present
+
+  - name: bob
+    fullname: Bob Byrne
+    description: Development
+    groups: [NetLab Developers]
+    state: present
+
+  - name: carol
+    fullname: Carol Chen
+    description: Contractor
+    groups: [NetLab Developers]
+    state: present      # contract ended? change to absent

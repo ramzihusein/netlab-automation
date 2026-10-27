@@ -4,8 +4,8 @@
 #          execution-environments/<ee_name>/execution-environment.yml with
 #          ansible-builder v3 on the lab host, and pushes it to the private
 #          automation hub that AAP pulls execution environments from.
-#          Survey "ee_name": netlab-ee (NetBox content) or linux-ee (Linux /
-#          infrastructure content).
+#          Survey "ee_name": netlab-ee (NetBox content), linux-ee (Linux /
+#          infrastructure content) or windows-ee (Windows content).
 #
 # Required AAP Credential: "NetLab Hub Registry" type, which injects
 #   ee_registry, ee_registry_username, ee_registry_password

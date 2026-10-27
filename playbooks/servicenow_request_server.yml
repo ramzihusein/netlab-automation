@@ -1,28 +1,31 @@
 ---
-# Job Template: Linux - Request Server in CMDB
+# Job Templates: Linux - Request Server in CMDB
+#                Windows - Request Server in CMDB (extra var server_family: windows)
 # Purpose: The CMDB comes first. Requesting a server only creates its
 #          ServiceNow CMDB record (status Pending Install); the next
-#          Linux - Provision / Start Servers (or Build Server Fleet) run
-#          builds it. Retiring marks the record Retired and the next
-#          Provision run removes the server. Stands in for a ServiceNow
+#          Provision / Start Servers run (or build workflow) builds it.
+#          Retiring marks the record Retired and the next Provision run
+#          removes the server. Stands in for a ServiceNow
 #          catalog request until the catalog is wired up; editing the
 #          records by hand in ServiceNow works exactly the same.
 #
-# Survey: server name (empty = the standard fleet web1, web2, db1), OS,
-#         role, request / retire
+# Survey: server name (empty = the standard fleet of that family), OS,
+#         role, request / retire. The family's CMDB class, OS values, roles
+#         and standard fleet come from vars/<server_family>/servers.yml.
 # Required AAP Credentials: "NetLab ServiceNow"
 
-- name: Request or retire a Linux server in the ServiceNow CMDB
+- name: Request or retire a server in the ServiceNow CMDB
   hosts: localhost
   connection: local
   gather_facts: false
 
   vars_files:
-    - ../vars/linux/servers.yml
+    - ../vars/{{ server_family }}/servers.yml
 
   vars:
+    server_family: linux        # linux / windows
     server_name: ""
-    server_os: rhel
+    server_os: "{{ cmdb_os | list | first }}"
     server_role: web
     request_action: request
     requested: >-
@@ -93,5 +96,5 @@
         msg: >-
           {{ 'Requested' if request_action == 'request' else 'Retired' }}
           {{ requested | map(attribute='name') | join(', ') }} in the CMDB.
-          Run "Linux - Provision / Start Servers" (or the Build Server Fleet
-          workflow) to {{ 'build' if request_action == 'request' else 'remove' }} it.
+          Run "{{ server_family | capitalize }} - Provision / Start Servers" (or the
+          build workflow) to {{ 'build' if request_action == 'request' else 'remove' }} it.

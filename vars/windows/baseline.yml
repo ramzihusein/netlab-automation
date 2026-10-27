@@ -1,0 +1,57 @@
+---
+# The configuration baseline every Windows server must meet, as data.
+# Used by playbooks/windows_baseline.yml (Windows - Apply Security Baseline
+# and Windows - Check Baseline Drift).
+
+timezone: Eastern Standard Time
+
+# Windows features that must not be installed
+features_absent:
+  - FS-SMB1            # SMB 1.0 (WannaCry)
+  - PowerShell-v2      # downgrade path around PowerShell logging
+
+# Services that must be stopped and disabled
+services_disabled:
+  - Spooler            # Print Spooler (PrintNightmare); servers don't print
+
+# Registry settings
+registry:
+  - name: SMB signing required (server)
+    path: HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters
+    value: RequireSecuritySignature
+    data: 1
+  - name: RDP requires Network Level Authentication
+    path: HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp
+    value: UserAuthentication
+    data: 1
+  - name: TLS 1.0 off (server side)
+    path: HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.0\Server
+    value: Enabled
+    data: 0
+  - name: TLS 1.1 off (server side)
+    path: HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.1\Server
+    value: Enabled
+    data: 0
+  - name: Login banner title
+    path: HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System
+    value: legalnoticecaption
+    data: Authorized access only
+    type: string
+  - name: Login banner text
+    path: HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System
+    value: legalnoticetext
+    data: This server is managed by Red Hat Ansible Automation Platform. Manual changes will be overwritten.
+    type: string
+
+# Local security policy (secedit sections)
+security_policy:
+  - {section: System Access, key: MinimumPasswordLength, value: 14}
+  - {section: System Access, key: PasswordComplexity, value: 1}
+  - {section: System Access, key: MaximumPasswordAge, value: 90}
+  - {section: System Access, key: PasswordHistorySize, value: 24}
+
+# Audit policy
+audit:
+  - {subcategory: Logon, audit_type: [success, failure]}
+  - {subcategory: User Account Management, audit_type: [success, failure]}
+  - {subcategory: Security Group Management, audit_type: [success]}

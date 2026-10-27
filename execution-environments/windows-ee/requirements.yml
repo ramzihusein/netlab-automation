@@ -1,0 +1,13 @@
+---
+# Collections added on top of the supported EE. Version ranges stay on
+# releases that support the base image's ansible-core 2.16.
+collections:
+  - name: community.windows
+    version: ">=2.3.0,<3.0.0"
+  # Same major version as the base image's amazon.aws 9.x.
+  - name: community.aws
+    version: ">=9.0.0,<10.0.0"
+  - name: netbox.netbox
+    version: ">=3.23.0,<4.0.0"
+  - name: servicenow.itsm
+    version: ">=2.16.0,<3.0.0"

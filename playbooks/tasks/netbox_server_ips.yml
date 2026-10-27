@@ -1,0 +1,106 @@
+---
+# NetBox owns the demo servers' addresses. Shared by the Linux and Windows
+# provision playbooks:
+#   - a server NetBox doesn't know yet gets the next free IP in the NetBox
+#     range server_ip_range (recorded with its DNS name and server_tag)
+#   - a server already running before NetBox assigned it one has its
+#     current address recorded instead
+#   - addresses of servers no longer in the list are given back
+#
+# Uses: servers (list of {name, role}), built (name -> private IP of the
+#       servers running now; {} on a rebuild), server_tag, server_kind
+#       (Linux / Windows, for the description), netbox_url, netbox_token
+# Sets: server_ip (name -> IP)
+
+- name: Addresses from NetBox
+  vars:
+    lookup_args: {api_endpoint: "{{ netbox_url }}", token: "{{ netbox_token }}", raw_data: true}
+    subnet_bits: "{{ server_ip_range.start_address | ansible.utils.ipaddr('prefix') }}"
+  module_defaults:
+    group/netbox.netbox.netbox:
+      netbox_url: "{{ netbox_url }}"
+      netbox_token: "{{ netbox_token }}"
+    ansible.builtin.uri:
+      headers:
+        Authorization: "Token {{ netbox_token }}"
+        Accept: application/json
+      body_format: json
+  block:
+    - name: NetBox tag for the servers' addresses
+      netbox.netbox.netbox_tag:
+        data:
+          name: "{{ server_tag }}"
+          description: "{{ server_kind }} demo server addresses (assigned by AAP)"
+
+    - name: Read the servers' addresses and the address range from NetBox
+      ansible.builtin.set_fact:
+        nb_addresses: "{{ query('netbox.netbox.nb_lookup', 'ip-addresses', api_filter='tag=' ~ server_tag, **lookup_args) }}"
+        nb_range: "{{ query('netbox.netbox.nb_lookup', 'ip-ranges', **lookup_args)
+                      | selectattr('start_address', 'equalto', server_ip_range.start_address) | first | default({}) }}"
+
+    - name: Check NetBox has the address range
+      ansible.builtin.assert:
+        that: nb_range | length > 0
+        fail_msg: >-
+          NetBox has no IP range starting at {{ server_ip_range.start_address }}:
+          run "NetLab - Populate NetBox" (it adds the demo servers' range).
+        quiet: true
+
+    - name: Record the address of servers built before NetBox assigned one
+      netbox.netbox.netbox_ip_address:
+        data:
+          address: "{{ built[item.name] }}/{{ subnet_bits }}"
+          dns_name: "{{ item.name }}.{{ dns_zone }}"
+          description: "{{ item.name }}: {{ server_kind }} demo {{ item.role }} server"
+          status: active
+          tags: ["{{ server_tag }}"]
+      loop: "{{ servers }}"
+      loop_control:
+        label: "{{ item.name }} -> {{ built[item.name] | default('') }}"
+      when:
+        - item.name ~ '.' ~ dns_zone not in nb_addresses | map(attribute='dns_name')
+        - item.name in built
+
+    # The NetBox API hands out the next free IP in the range and records it
+    # in the same call.
+    - name: Take the next free address from NetBox for new servers
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/ip-ranges/{{ nb_range.id }}/available-ips/"
+        method: POST
+        body:
+          dns_name: "{{ item.name }}.{{ dns_zone }}"
+          description: "{{ item.name }}: {{ server_kind }} demo {{ item.role }} server"
+          status: active
+          tags: [{slug: "{{ server_tag }}"}]
+        status_code: 201
+      loop: "{{ servers }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when:
+        - item.name ~ '.' ~ dns_zone not in nb_addresses | map(attribute='dns_name')
+        - item.name not in built
+
+    - name: Give back the addresses of servers that are gone
+      netbox.netbox.netbox_ip_address:
+        data:
+          address: "{{ item.address }}"
+        state: absent
+      loop: "{{ nb_addresses }}"
+      loop_control:
+        label: "{{ item.dns_name }} {{ item.address }}"
+      when: item.dns_name.split('.') | first not in servers | map(attribute='name')
+
+    - name: Each server's address, as NetBox has it now
+      ansible.builtin.set_fact:
+        server_ip: "{{ dict(addresses | map(attribute='dns_name') | map('split', '.') | map('first')
+                            | zip(addresses | map(attribute='address') | map('ansible.utils.ipaddr', 'address'))) }}"
+      vars:
+        addresses: "{{ query('netbox.netbox.nb_lookup', 'ip-addresses', api_filter='tag=' ~ server_tag, **lookup_args) }}"
+
+    - name: Servers whose address no longer matches NetBox
+      ansible.builtin.debug:
+        msg: "{{ item.key }} runs on {{ item.value }}, NetBox says {{ server_ip[item.key] }}: rebuild to move it"
+      loop: "{{ built | dict2items | selectattr('key', 'in', server_ip) | list }}"
+      loop_control:
+        label: "{{ item.key }}"
+      when: server_ip[item.key] != item.value

@@ -1,0 +1,32 @@
+<powershell>
+# First boot of a NetLab Windows server (EC2 user data, rendered by
+# playbooks/windows_provision.yml). Only makes the server reachable for
+# Ansible; everything else is done by the Windows job templates.
+# No secrets in here: the password is read from SSM Parameter Store through
+# the instance's IAM role.
+$ErrorActionPreference = 'Stop'
+Start-Transcript -Path C:\Windows\Temp\netlab-first-boot.log
+
+# The local admin AAP connects as
+$password = (Get-SSMParameter -Name '{{ windows_password_parameter }}' -WithDecryption $true -Region '{{ aws_region }}').Value
+$secure = ConvertTo-SecureString $password -AsPlainText -Force
+if (Get-LocalUser -Name '{{ windows_admin_user }}' -ErrorAction SilentlyContinue) {
+    Set-LocalUser -Name '{{ windows_admin_user }}' -Password $secure
+} else {
+    New-LocalUser -Name '{{ windows_admin_user }}' -Password $secure -PasswordNeverExpires -Description 'Ansible Automation Platform' | Out-Null
+    Add-LocalGroupMember -Group Administrators -Member '{{ windows_admin_user }}'
+}
+# Local admins other than the built-in Administrator only get a full token
+# over the network with this set.
+New-ItemProperty -Path HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System `
+    -Name LocalAccountTokenFilterPolicy -Value 1 -PropertyType DWord -Force | Out-Null
+
+# WinRM over HTTPS (5986) with a self-signed certificate
+$cert = New-SelfSignedCertificate -DnsName '{{ item.name }}', '{{ item.name }}.{{ dns_zone }}' `
+    -CertStoreLocation Cert:\LocalMachine\My -NotAfter (Get-Date).AddYears(5)
+Get-ChildItem WSMan:\localhost\Listener | Where-Object { $_.Keys -contains 'Transport=HTTPS' } | Remove-Item -Recurse -Force
+New-Item -Path WSMan:\localhost\Listener -Transport HTTPS -Address * -CertificateThumbPrint $cert.Thumbprint -Force | Out-Null
+New-NetFirewallRule -DisplayName 'WinRM HTTPS (Ansible)' -Direction Inbound -Protocol TCP -LocalPort 5986 -Action Allow | Out-Null
+
+Stop-Transcript
+</powershell>

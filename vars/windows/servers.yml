@@ -1,0 +1,32 @@
+---
+# The Windows demo servers, as the ServiceNow CMDB describes them.
+#
+# Same flow as Linux: Windows - Request Server in CMDB adds a record
+# (Pending Install), Windows - Provision / Start Servers builds whatever the
+# CMDB lists with an IP from NetBox and writes the build back, and the
+# inventory "Windows Servers" is read from the CMDB.
+
+# The standard fleet. Windows - Request Server in CMDB with no server name
+# registers these (only the ones not already in the CMDB).
+standard_servers:
+  - {name: win1, os: windows, role: web}
+
+# How the records look in the CMDB.
+cmdb_server_class: cmdb_ci_win_server
+# Marks our records; the developer instance ships hundreds of fake servers.
+cmdb_server_marker: NetLab demo server
+# "Operating System" is a fixed choice list on the instance with nothing
+# newer than Windows 2003, so "OS Version" (free text) says what it runs.
+cmdb_os:
+  windows: {os: "", os_version: Windows Server 2022}
+# The role goes in the CMDB "Subcategory" field.
+server_roles: [web]
+
+# How they're built in AWS.
+windows_ami_param: /aws/service/ami-windows-latest/Windows_Server-2022-English-Full-Base
+windows_instance_type: t3.medium      # Windows wants 4 GB
+# The local admin AAP connects as. Its password comes from the AAP
+# credential "NetLab Windows Admin", goes to SSM Parameter Store as a
+# SecureString, and the server reads it at first boot through an IAM role.
+windows_password_parameter: /netlab/windows/admin-password
+windows_iam_role: netlab-windows-server

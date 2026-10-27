@@ -30,6 +30,7 @@ ORG = "Default"
 EE = "Default execution environment"
 NETLAB_EE = "NetLab EE"            # built from execution-environments/netlab-ee/
 LINUX_EE = "Linux EE"              # built from execution-environments/linux-ee/
+WINDOWS_EE = "Windows EE"          # built from execution-environments/windows-ee/
 BACKUP_REPO = "ramzihusein/netlab-backups"   # private: running configs hold secrets
 G = "/api/gateway/v1"
 HUB_REGISTRY = "gateway.aap.ramzidev.com"   # push (from the lab host, TLS verify off)
@@ -255,6 +256,12 @@ def hub_registry(org_id, login_ct):
         "credential": pull["id"],
         "description": "Supported EE + community.general, community.crypto, containers.podman, "
                        "netbox.netbox, servicenow.itsm (execution-environments/linux-ee)",
+    })
+    ensure(f"{C}/execution_environments/", WINDOWS_EE, {
+        "organization": org_id, "image": f"{HUB_PULL_REGISTRY}/windows-ee:latest", "pull": "always",
+        "credential": pull["id"],
+        "description": "Supported EE + community.windows, community.aws, netbox.netbox, servicenow.itsm "
+                       "(execution-environments/windows-ee)",
     })
     return push, ee
 
@@ -537,9 +544,10 @@ def job_templates(org_id, proj, ee_id, netlab_ee_id, inv, creds):
         "name": "Execution environment", "description": "",
         "spec": [{
             "question_name": "Which execution environment?",
-            "question_description": "netlab-ee = NetBox content; linux-ee = Linux / infrastructure content. "
+            "question_description": "netlab-ee = NetBox content; linux-ee = Linux / infrastructure content; "
+                                    "windows-ee = Windows content. "
                                     "Definitions: execution-environments/<name>/ in the project",
-            "variable": "ee_name", "type": "multiplechoice", "choices": ["netlab-ee", "linux-ee"],
+            "variable": "ee_name", "type": "multiplechoice", "choices": ["netlab-ee", "linux-ee", "windows-ee"],
             "default": "netlab-ee", "required": True,
         }],
     })
@@ -873,6 +881,155 @@ def linux_side(org_id, proj, creds, sn_cred=None):
     return inv, jts
 
 
+WINDOWS_SECRETS = os.path.expanduser("~/.netlab-windows.json")
+
+
+def windows_side(org_id, proj, creds, sn_cred):
+    """Windows demo: win1 (EC2, Windows Server 2022, IIS), owned by the
+    ServiceNow CMDB like the Linux servers, on the Windows EE.
+
+    The local admin AAP connects as gets a generated password, kept in the
+    credential "NetLab Windows Admin" (and in ~/.netlab-windows.json for RDP);
+    Provision hands it to the servers through SSM Parameter Store."""
+    print("Windows demo")
+    if not sn_cred:
+        print("  ! no ServiceNow credential: skipping Windows (its servers live in the CMDB)")
+        return None
+    windows_ee = find(f"{C}/execution_environments/", WINDOWS_EE)["id"]
+    ct, _ = ensure(f"{C}/credential_types/", "Windows Admin Login", {
+        "kind": "cloud",
+        "description": "Local Windows admin: the WinRM login, and the password Provision gives new servers",
+        "inputs": {"fields": [
+            {"id": "username", "label": "Username", "type": "string"},
+            {"id": "password", "label": "Password", "type": "string", "secret": True},
+        ], "required": ["username", "password"]},
+        "injectors": {"extra_vars": {
+            "ansible_user": "{{ username }}", "ansible_password": "{{ password }}",
+            "windows_admin_user": "{{ username }}", "windows_admin_password": "{{ password }}",
+        }},
+    })
+    cred = find(f"{C}/credentials/", "NetLab Windows Admin")
+    if cred is None:
+        # Windows complexity rules: upper, lower, digit and symbol, 14+ characters.
+        password = secrets.token_urlsafe(18) + "Aa1!"
+        cred, _ = ensure(f"{C}/credentials/", "NetLab Windows Admin", {
+            "credential_type": ct["id"], "organization": org_id,
+            "description": "Local admin on the NetLab Windows servers (WinRM + RDP)",
+            "inputs": {"username": "ansible", "password": password},
+        })
+        with open(WINDOWS_SECRETS, "w") as f:
+            json.dump({"windows_admin_user": "ansible", "windows_admin_password": password}, f, indent=2)
+        print(f"  password written to {WINDOWS_SECRETS}")
+    else:
+        print("  = credentials: NetLab Windows Admin (secrets kept)")
+
+    inv, _ = ensure(f"{C}/inventories/", "Windows Servers", {
+        "organization": org_id, "description": "Windows demo servers (the ServiceNow CMDB)"})
+    ensure(f"{C}/inventory_sources/", "Windows CMDB", {
+        "inventory": inv["id"], "source": "scm", "source_project": proj["id"],
+        "execution_environment": windows_ee, "source_path": "inventories/windows_servers.now.yml",
+        "credential": sn_cred["id"], "overwrite": True, "overwrite_vars": True,
+        "update_on_launch": True, "update_cache_timeout": 0,
+    }, inventory=inv["id"])
+
+    local = find(f"{C}/inventories/", LOCAL_INVENTORY)["id"]
+    pv = {k: PROVISION_VARS[k] for k in ("vpc_id", "subnet_id", "key_pair_name", "aap_security_group_ids",
+                                          "route53_zone_id", "admin_cidrs")}
+    servers = inv["id"]
+    specs = [
+        ("Windows - Provision / Start Servers", "playbooks/windows_provision.yml", local,
+         ["aws", "servicenow", "netbox", "windows"], {"extra_vars": yaml_vars(pv), "survey_enabled": True}),
+        ("Windows - Request Server in CMDB", "playbooks/servicenow_request_server.yml", local, ["servicenow"],
+         {"extra_vars": yaml_vars({"server_family": "windows"}), "survey_enabled": True}),
+        ("Windows - Server Inventory Report", "playbooks/windows_report.yml", servers, ["windows"],
+         {"ask_limit_on_launch": True}),
+        ("Windows - Apply Security Baseline", "playbooks/windows_baseline.yml", servers, ["windows"],
+         {"diff_mode": True, "ask_limit_on_launch": True}),
+        # Same playbook in check + diff mode: shows drift from the baseline, changes nothing.
+        ("Windows - Check Baseline Drift", "playbooks/windows_baseline.yml", servers, ["windows"],
+         {"job_type": "check", "diff_mode": True, "ask_limit_on_launch": True}),
+        ("Windows - Manage Users", "playbooks/windows_users.yml", servers, ["windows"],
+         {"ask_limit_on_launch": True}),
+        ("Windows - Deploy IIS Site", "playbooks/windows_webapp.yml", servers, ["windows"],
+         {"survey_enabled": True}),
+        ("Windows - Patch Servers", "playbooks/windows_patching.yml", servers, ["windows"],
+         {"survey_enabled": True, "ask_limit_on_launch": True}),
+        ("Windows - Manage a Service", "playbooks/windows_service.yml", servers, ["windows"],
+         {"survey_enabled": True, "ask_limit_on_launch": True}),
+    ]
+    creds = dict(creds, servicenow=sn_cred["id"], windows=cred["id"])
+    jts = {}
+    for name, playbook, inventory, cred_keys, extra in specs:
+        jt, _ = ensure(f"{C}/job_templates/", name, dict({
+            "job_type": "run", "organization": org_id, "project": proj["id"], "playbook": playbook,
+            "inventory": inventory, "execution_environment": windows_ee,
+            "description": f"Windows demo: {playbook}",
+        }, **extra))
+        have = {c["id"] for c in api("GET", f"{C}/job_templates/{jt['id']}/credentials/")["results"]}
+        for key in cred_keys:
+            if creds[key] not in have:
+                api("POST", f"{C}/job_templates/{jt['id']}/credentials/", {"id": creds[key]})
+        jts[name] = jt
+
+    def survey(jt_name, title, spec):
+        api("POST", f"{C}/job_templates/{jts[jt_name]['id']}/survey_spec/",
+            {"name": title, "description": "", "spec": spec})
+
+    def choice(question, variable, choices, default, description=""):
+        return {"question_name": question, "question_description": description, "variable": variable,
+                "type": "multiplechoice", "choices": choices, "default": default, "required": True}
+
+    rebuild_q = choice("Start from brand-new servers?", "rebuild", ["no", "yes"], "no",
+                       "yes = terminate the Windows servers and build fresh ones from the latest image")
+    survey("Windows - Provision / Start Servers", "Servers", [rebuild_q])
+    survey("Windows - Request Server in CMDB", "Server", [
+        {"question_name": "Server name (empty = the standard fleet, win1)",
+         "variable": "server_name", "type": "text", "default": "", "required": False,
+         "question_description": "Lower case, e.g. win2"},
+        choice("Role", "server_role", ["web"], "web"),
+        choice("Request or retire", "request_action", ["request", "retire"], "request",
+               "request = new CMDB record (Pending Install); retire = mark it Retired. "
+               "Windows - Provision / Start Servers then builds or removes it."),
+    ])
+    survey("Windows - Deploy IIS Site", "Release", [
+        {"question_name": "Version", "variable": "app_version", "type": "text", "default": "1.0",
+         "required": True},
+        {"question_name": "Message on the page", "variable": "app_message", "type": "text",
+         "default": "Hello from Ansible Automation Platform", "required": True},
+        choice("Page colour", "app_color", ["red", "blue", "green", "purple"], "blue"),
+    ])
+    survey("Windows - Patch Servers", "Patching", [
+        choice("Patch scope", "patch_scope", ["report", "security", "all"], "report",
+               "report = list pending updates only; security = security + critical; all = every update"),
+        choice("Reboot", "reboot_policy", ["if_needed", "never"], "if_needed",
+               "if_needed = reboot only when an update requires it"),
+    ])
+    survey("Windows - Manage a Service", "Service", [
+        choice("Service", "service_name", ["web server", "Windows Update", "time sync", "print spooler"],
+               "web server"),
+        choice("Action", "service_action", ["status", "restarted", "started", "stopped"], "status"),
+    ])
+
+    # From nothing to a configured web server in one run.
+    wf, _ = ensure(f"{C}/workflow_job_templates/", "Windows - Build Server", {
+        "organization": org_id,
+        "description": "Provision/start servers, security baseline, users, IIS site, report",
+    })
+    api("PATCH", f"{C}/workflow_job_templates/{wf['id']}/", {"survey_enabled": True})
+    api("POST", f"{C}/workflow_job_templates/{wf['id']}/survey_spec/",
+        {"name": "Servers", "description": "", "spec": [rebuild_q]})
+    nodes_path = f"{C}/workflow_job_templates/{wf['id']}/workflow_nodes/"
+    if not api("GET", nodes_path)["count"]:
+        chain = ["Windows - Provision / Start Servers", "Windows - Apply Security Baseline",
+                 "Windows - Manage Users", "Windows - Deploy IIS Site", "Windows - Server Inventory Report"]
+        ids = [api("POST", nodes_path, {"unified_job_template": jts[name]["id"],
+                                         "identifier": name.split(" - ", 1)[1]})["id"] for name in chain]
+        for parent, child in zip(ids, ids[1:]):
+            api("POST", f"{C}/workflow_job_template_nodes/{parent}/success_nodes/", {"id": child})
+        print("  + workflow nodes")
+    return inv, jts
+
+
 def remediate_workflow(org_id, jts):
     """Show the drift, approve, put NetBox's config back, prove it's in sync.
     Also the quick way to reset the lab after a demo."""
@@ -1129,6 +1286,7 @@ def main():
     remediate_workflow(org_id, jts)
     sn_cred = servicenow_side(org_id, proj, netlab_ee["id"], devices["id"])
     linux_side(org_id, proj, creds, sn_cred)
+    windows_side(org_id, proj, creds, sn_cred)
     rbac(jts, [vlan_wf["id"]], inv, a.secrets_out)
     if not a.skip_eda:
         print("EDA project + rulebook activations")

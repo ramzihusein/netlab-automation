@@ -1,0 +1,45 @@
+---
+# Job Template: Windows - Patch Servers
+# Purpose: Windows Update, one server at a time: report what's pending,
+#          install security or all updates, reboot only when an update
+#          needs it, and check the server comes back.
+#
+# Survey:
+#   patch_scope    report = list what's pending, change nothing
+#                  security = security and critical updates;  all = every update
+#   reboot_policy  if_needed = reboot when an update requires it
+#                  never = leave it for a maintenance window
+#
+# Required AAP Credentials: "NetLab Windows Admin"
+
+- name: Patch Windows servers
+  hosts: windows
+  gather_facts: false
+  serial: 1                    # rolling: one server at a time
+  max_fail_percentage: 0       # stop the rollout at the first failure
+
+  vars:
+    patch_scope: report
+    reboot_policy: if_needed
+    categories:
+      report: [SecurityUpdates, CriticalUpdates, UpdateRollups, Updates, DefinitionUpdates]
+      security: [SecurityUpdates, CriticalUpdates]
+      all: [SecurityUpdates, CriticalUpdates, UpdateRollups, Updates, DefinitionUpdates]
+
+  tasks:
+
+    - name: "{{ 'Look for' if patch_scope == 'report' else 'Install' }} updates ({{ patch_scope }})"
+      ansible.windows.win_updates:
+        category_names: "{{ categories[patch_scope] }}"
+        state: "{{ 'searched' if patch_scope == 'report' else 'installed' }}"
+        reboot: "{{ reboot_policy == 'if_needed' }}"
+        reboot_timeout: 1800
+      register: updates
+
+    - name: What was found or installed
+      ansible.builtin.debug:
+        msg:
+          - "{{ updates.found_update_count }} update(s) {{ 'pending' if patch_scope == 'report' else 'found' }}"
+          - "{{ updates.installed_update_count | default(0) }} installed, {{ updates.failed_update_count | default(0) }} failed"
+          - "{{ updates.updates.values() | map(attribute='title') | list }}"
+          - "Reboot still needed: {{ updates.reboot_required }}"

@@ -1,0 +1,29 @@
+---
+# AAP inventory source "Windows CMDB" (sourced from project), inventory
+# "Windows Servers". Like inventories/linux_servers.now.yml: a server is in
+# this inventory because the ServiceNow CMDB has an Installed record for it.
+# Instance URL and login come from the "NetLab ServiceNow" credential. The
+# file name must end in now.yml.
+#
+# CMDB conventions (see vars/windows/servers.yml):
+#   short_description  "NetLab demo server"  marks our records
+#   subcategory        web                   server role -> group web
+#   install_status     Installed             only built servers are listed
+#   ip_address         private IP, written by Windows - Provision / Start Servers
+plugin: servicenow.itsm.now
+table: cmdb_ci_win_server
+sysparm_query: short_description=NetLab demo server^install_status=1
+columns: [name, ip_address, fqdn, os_version, subcategory, object_id]
+keyed_groups:
+  - key: subcategory
+    separator: ""
+groups:
+  windows: true
+compose:
+  ansible_host: ip_address
+  # WinRM over HTTPS, set up at first boot. The login comes from the AAP
+  # credential "NetLab Windows Admin".
+  ansible_connection: "'winrm'"
+  ansible_port: 5986
+  ansible_winrm_transport: "'ntlm'"
+  ansible_winrm_server_cert_validation: "'ignore'"   # self-signed certificate

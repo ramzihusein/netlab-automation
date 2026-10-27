@@ -1,0 +1,43 @@
+---
+# Job Template: Windows - Manage a Service
+# Purpose: Self-service operations: restart (or stop/start/check) a Windows
+#          service without anyone needing RDP. Pair it with RBAC so a help
+#          desk can run this and nothing else.
+#
+# Survey: service_name (web server, Windows Update, time sync, print
+#   spooler) and service_action restarted / started / stopped / status
+#
+# Required AAP Credentials: "NetLab Windows Admin"
+
+- name: Manage a Windows service
+  hosts: windows
+  gather_facts: false
+
+  vars:
+    service_name: web server
+    service_action: status
+    service_names:
+      web server: W3SVC
+      Windows Update: wuauserv
+      time sync: W32Time
+      print spooler: Spooler
+    service: "{{ service_names[service_name] }}"
+
+  tasks:
+
+    - name: "{{ service_action | capitalize }} {{ service_name }}"
+      ansible.windows.win_service:
+        name: "{{ service }}"
+        state: "{{ service_action }}"
+      when: service_action != 'status'
+
+    - name: Current status
+      ansible.windows.win_service_info:
+        name: "{{ service }}"
+      register: info
+
+    - name: Show it
+      ansible.builtin.debug:
+        msg: >-
+          {{ (info.services[0].display_name ~ ': ' ~ info.services[0].state ~ ' (start mode ' ~ info.services[0].start_mode ~ ')')
+             if info.exists else service ~ ' is not installed on ' ~ inventory_hostname }}

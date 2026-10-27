@@ -1,0 +1,4 @@
+# Python libraries the netbox.netbox modules import (server IPs come from NetBox).
+pynetbox>=7.4.0
+packaging
+pytz

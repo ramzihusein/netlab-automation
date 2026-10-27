@@ -1,0 +1,83 @@
+---
+# Job Templates: Windows - Apply Security Baseline
+#                Windows - Check Baseline Drift (same playbook, check + diff
+#                mode: reports what differs, changes nothing)
+# Purpose: Every Windows server meets the same baseline, defined as data in
+#          vars/windows/baseline.yml: computer name, time zone, features,
+#          services, registry hardening, password and audit policy,
+#          firewall. Run it again any time: only drift gets changed.
+#
+# Required AAP Credentials: "NetLab Windows Admin"
+
+- name: Windows security baseline
+  hosts: windows
+  gather_facts: false
+
+  vars_files:
+    - ../vars/windows/baseline.yml
+
+  tasks:
+
+    - name: Computer name matches the inventory (and the CMDB)
+      ansible.windows.win_hostname:
+        name: "{{ inventory_hostname }}"
+      register: hostname
+
+    - name: Reboot for the new name
+      ansible.windows.win_reboot:
+        reboot_timeout: 900
+      when: hostname.reboot_required
+
+    - name: Time zone
+      ansible.windows.win_timezone:
+        timezone: "{{ timezone }}"
+
+    - name: Features that must not be installed
+      ansible.windows.win_feature:
+        name: "{{ features_absent }}"
+        state: absent
+      register: features
+
+    - name: Services that must be off
+      ansible.windows.win_service:
+        name: "{{ item }}"
+        state: stopped
+        start_mode: disabled
+      loop: "{{ services_disabled }}"
+
+    - name: Registry hardening
+      ansible.windows.win_regedit:
+        path: "{{ item.path }}"
+        name: "{{ item.value }}"
+        data: "{{ item.data }}"
+        type: "{{ item.type | default('dword') }}"
+      loop: "{{ registry }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Password policy
+      community.windows.win_security_policy:
+        section: "{{ item.section }}"
+        key: "{{ item.key }}"
+        value: "{{ item.value }}"
+      loop: "{{ security_policy }}"
+      loop_control:
+        label: "{{ item.key }} = {{ item.value }}"
+
+    - name: Audit policy
+      ansible.windows.win_audit_policy_system:
+        subcategory: "{{ item.subcategory }}"
+        audit_type: "{{ item.audit_type }}"
+      loop: "{{ audit }}"
+      loop_control:
+        label: "{{ item.subcategory }}: {{ item.audit_type | join(', ') }}"
+
+    - name: Windows Firewall on for every profile
+      ansible.windows.win_firewall:
+        profiles: [Domain, Private, Public]
+        state: enabled
+
+    - name: Reboot if removing a feature needs it
+      ansible.windows.win_reboot:
+        reboot_timeout: 900
+      when: features.reboot_required | default(false)

@@ -1,0 +1,316 @@
+---
+# Job Template: Windows - Provision / Start Servers
+# Purpose: Builds (or starts, if stopped) the Windows demo servers the
+#          ServiceNow CMDB lists, in the AAP VPC. The standard fleet:
+#            win1  Windows Server 2022   IIS web server
+#          Same flow as the Linux servers:
+#            - the CMDB owns the list (Windows - Request Server in CMDB): a
+#              new record gets built, a Retired one gets removed, and the IP
+#              and instance ID go back into the record (Installed)
+#            - NetBox owns the addresses: the next free IP in the range
+#              "Demo servers", tagged netlab-windows
+#          At first boot the server creates the local admin AAP connects as
+#          and turns on WinRM over HTTPS. The password never appears in EC2
+#          user data: this job stores it in SSM Parameter Store (SecureString)
+#          and the server reads it through its IAM role.
+#          With rebuild=yes (survey) the old servers are terminated first.
+#
+# Required AAP Credentials: "AWS Creds", "NetLab ServiceNow", "NetLab NetBox",
+#   "NetLab Windows Admin"
+# Required AAP Variables (set in Job Template): same as NetLab - Provision Infra
+#   vpc_id, subnet_id, key_pair_name, aap_security_group_ids, route53_zone_id,
+#   admin_cidrs
+
+- name: Windows demo servers — AWS
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../vars/netlab.yml
+    - ../vars/windows/servers.yml
+
+  vars:
+    rebuild: "no"
+    common_tags:
+      Project: netlab-windows
+      ManagedBy: ansible
+      # Stopped with AAP every evening by the AWS power schedule; this job
+      # starts them again.
+      PowerSchedule: stop-only
+
+  tasks:
+
+    - name: Our server records in the CMDB
+      servicenow.itsm.configuration_item_info:
+        sys_class_name: "{{ cmdb_server_class }}"
+        sysparm_query: "short_description={{ cmdb_server_marker }}"
+      register: cmdb
+
+    - name: Servers the CMDB wants (everything not Retired)
+      ansible.builtin.set_fact:
+        servers: "{{ servers | default([]) + [{'name': item.name, 'role': item.subcategory, 'sys_id': item.sys_id}] }}"
+      loop: "{{ cmdb.records | rejectattr('install_status', 'equalto', 'retired') | list }}"
+      loop_control:
+        label: "{{ item.name }} ({{ item.subcategory }}, {{ item.install_status }})"
+
+    - name: Servers the CMDB has retired
+      ansible.builtin.set_fact:
+        servers: "{{ servers | default([]) }}"
+        retired: "{{ cmdb.records | selectattr('install_status', 'equalto', 'retired') | list }}"
+
+    - name: Check the server list
+      ansible.builtin.assert:
+        that: servers | length > 0
+        fail_msg: "The CMDB lists no NetLab Windows servers: run Windows - Request Server in CMDB first."
+        quiet: true
+
+    - name: Find the servers already built (running or stopped)
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+        filters:
+          "tag:Project": netlab-windows
+          instance-state-name: [pending, running, stopping, stopped]
+      register: existing
+
+    # ------------------------------------------- addresses come from NetBox
+    - name: Servers running now, and their addresses
+      ansible.builtin.set_fact:
+        # A rebuild replaces them, so it doesn't count them.
+        built: "{{ {} if rebuild | bool else
+                   dict(existing.instances | map(attribute='tags.Name') | zip(existing.instances | map(attribute='private_ip_address'))) }}"
+
+    - name: Take the servers' addresses from NetBox
+      ansible.builtin.include_tasks: tasks/netbox_server_ips.yml
+      vars:
+        server_tag: netlab-windows
+        server_kind: Windows
+
+    # --------------------------------- the admin password, without user data
+    - name: Store the admin password in SSM Parameter Store (SecureString)
+      community.aws.ssm_parameter:
+        name: "{{ windows_password_parameter }}"
+        description: Local admin password of the NetLab Windows servers (AAP credential "NetLab Windows Admin")
+        string_type: SecureString
+        value: "{{ windows_admin_password }}"
+        region: "{{ aws_region }}"
+      no_log: true
+
+    - name: Which AWS account is this
+      amazon.aws.aws_caller_info:
+      register: account
+
+    - name: IAM role the servers boot with (instance profile of the same name)
+      amazon.aws.iam_role:
+        name: "{{ windows_iam_role }}"
+        description: NetLab Windows servers - read their admin password from SSM
+        assume_role_policy_document:
+          Version: "2012-10-17"
+          Statement:
+            - {Effect: Allow, Principal: {Service: ec2.amazonaws.com}, Action: sts:AssumeRole}
+        create_instance_profile: true
+        tags: "{{ common_tags }}"
+
+    - name: Allow it to read that one parameter, nothing else
+      amazon.aws.iam_policy:
+        iam_type: role
+        iam_name: "{{ windows_iam_role }}"
+        policy_name: read-admin-password
+        policy_json:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: "arn:aws:ssm:{{ aws_region }}:{{ account.account }}:parameter{{ windows_password_parameter }}"
+
+    # ------------------------------------------------------------------- AWS
+    - name: Security group (WinRM from AAP, RDP + HTTP from admins)
+      amazon.aws.ec2_security_group:
+        name: netlab-windows-sg
+        description: Windows demo servers
+        vpc_id: "{{ vpc_id }}"
+        region: "{{ aws_region }}"
+        rules: >-
+          {{
+            [{'proto': 'tcp', 'ports': [80, 3389, 5986], 'cidr_ip': admin_cidrs, 'rule_desc': 'admin'}]
+            + (aap_security_group_ids | map('regex_replace', '^', '{"proto": "tcp", "ports": [80, 5986], "rule_desc": "AAP", "group_id": "') | map('regex_replace', '$', '"}') | map('from_json') | list)
+          }}
+        tags: "{{ common_tags | combine({'Name': 'netlab-windows-sg'}) }}"
+      register: windows_sg
+
+    - name: Remove the servers the CMDB no longer lists (retired or deleted)
+      when: leftovers | length > 0
+      vars:
+        leftovers: "{{ existing.instances | rejectattr('tags.Name', 'in', servers | map(attribute='name') | list) | list }}"
+      block:
+        - name: Terminate
+          amazon.aws.ec2_instance:
+            region: "{{ aws_region }}"
+            instance_ids: "{{ leftovers | map(attribute='instance_id') | list }}"
+            state: absent
+            wait: true
+
+        - name: Look up their DNS names
+          amazon.aws.route53:
+            hosted_zone_id: "{{ route53_zone_id }}"
+            record: "{{ item.tags.Name }}.{{ dns_zone }}"
+            type: A
+            state: get
+          loop: "{{ leftovers }}"
+          loop_control:
+            label: "{{ item.tags.Name }}.{{ dns_zone }}"
+          register: old_dns
+
+        - name: Delete their DNS names
+          amazon.aws.route53:
+            hosted_zone_id: "{{ route53_zone_id }}"
+            record: "{{ item.set.record }}"
+            type: A
+            ttl: "{{ item.set.ttl }}"
+            value: "{{ item.set['values'] }}"
+            state: absent
+          loop: "{{ old_dns.results | selectattr('set.record', 'defined') | list }}"
+          loop_control:
+            label: "{{ item.set.record | default('') }}"
+
+    - name: Terminate the old servers (rebuild)
+      amazon.aws.ec2_instance:
+        region: "{{ aws_region }}"
+        filters:
+          "tag:Project": netlab-windows
+          instance-state-name: [pending, running, stopping, stopped]
+        state: absent
+        wait: true
+      when: rebuild | bool
+
+    - name: Launch or start the servers
+      amazon.aws.ec2_instance:
+        name: "{{ item.name }}"
+        region: "{{ aws_region }}"
+        instance_type: "{{ windows_instance_type }}"
+        image_id: "{{ lookup('amazon.aws.ssm_parameter', windows_ami_param, region=aws_region) }}"
+        key_name: "{{ key_pair_name }}"
+        vpc_subnet_id: "{{ subnet_id }}"
+        security_groups: ["{{ windows_sg.group_id }}"]
+        iam_instance_profile: "{{ windows_iam_role }}"
+        user_data: "{{ lookup('ansible.builtin.template', 'windows/user_data.ps1.j2') }}"
+        network:
+          assign_public_ip: true
+          private_ip_address: "{{ server_ip[item.name] }}"
+        volumes:
+          - device_name: /dev/sda1
+            ebs:
+              volume_size: 50
+              volume_type: gp3
+              delete_on_termination: true
+              encrypted: true
+        filters:
+          "tag:Name": "{{ item.name }}"
+          "tag:Project": netlab-windows
+          instance-state-name: [pending, running, stopping, stopped]
+        tags: "{{ common_tags | combine({'Role': item.role, 'OS': 'windows'}) }}"
+        wait: true
+        state: running
+      loop: "{{ servers }}"
+      loop_control:
+        label: "{{ item.name }} ({{ item.role }}, {{ server_ip[item.name] }})"
+      # A brand-new IAM instance profile takes a few seconds to be usable.
+      register: launched
+      retries: 6
+      delay: 10
+      until: launched is succeeded
+
+    - name: Re-read the servers for their final addresses
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+        filters:
+          "tag:Project": netlab-windows
+          instance-state-name: running
+      register: running
+
+    - name: Publish DNS names (<name>.{{ dns_zone }})
+      amazon.aws.route53:
+        hosted_zone_id: "{{ route53_zone_id }}"
+        record: "{{ item.tags.Name }}.{{ dns_zone }}"
+        type: A
+        ttl: 60
+        value: "{{ item.public_ip_address }}"
+        overwrite: true
+        state: present
+      loop: "{{ running.instances }}"
+      loop_control:
+        label: "{{ item.tags.Name }}.{{ dns_zone }} -> {{ item.public_ip_address }}"
+
+    # First boot takes a few minutes on Windows.
+    - name: Wait for WinRM over HTTPS (from the AAP execution node)
+      ansible.builtin.wait_for:
+        host: "{{ item.private_ip_address }}"
+        port: 5986
+        delay: 30
+        timeout: 1200
+      loop: "{{ running.instances }}"
+      loop_control:
+        label: "{{ item.tags.Name }}"
+
+    - name: Hand the servers to the next play
+      ansible.builtin.add_host:
+        name: "{{ item.tags.Name }}"
+        groups: built_now
+        ansible_host: "{{ item.private_ip_address }}"
+      loop: "{{ running.instances }}"
+      loop_control:
+        label: "{{ item.tags.Name }}"
+
+    - name: Write the build back to the CMDB (Installed, IP, instance ID)
+      servicenow.itsm.configuration_item:
+        sys_id: "{{ server.sys_id }}"
+        sys_class_name: "{{ cmdb_server_class }}"
+        ip_address: "{{ item.private_ip_address }}"
+        install_status: installed
+        operational_status: operational
+        other:
+          host_name: "{{ item.tags.Name }}"
+          fqdn: "{{ item.tags.Name }}.{{ dns_zone }}"
+          object_id: "{{ item.instance_id }}"
+      vars:
+        server: "{{ servers | selectattr('name', 'equalto', item.tags.Name) | first }}"
+      loop: "{{ running.instances }}"
+      loop_control:
+        label: "{{ item.tags.Name }} -> {{ item.private_ip_address }}"
+
+    - name: Mark retired servers' records as gone
+      servicenow.itsm.configuration_item:
+        sys_id: "{{ item.sys_id }}"
+        sys_class_name: "{{ cmdb_server_class }}"
+        operational_status: retired
+        ip_address: ""
+        other:
+          object_id: ""
+      loop: "{{ retired }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+
+- name: Windows demo servers — check AAP can log in
+  hosts: built_now
+  gather_facts: false
+
+  vars:
+    # Same connection settings the "Windows Servers" inventory sets.
+    ansible_connection: winrm
+    ansible_port: 5986
+    ansible_winrm_transport: ntlm
+    ansible_winrm_server_cert_validation: ignore   # self-signed WinRM certificate
+
+  tasks:
+
+    - name: Log in over WinRM (the first boot may still be finishing)
+      ansible.builtin.wait_for_connection:
+        timeout: 600
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}.aap.ramzidev.com ({{ ansible_host }}) answers WinRM.
+          RDP from an admin address as {{ ansible_user }}; the password is in the
+          AAP credential "NetLab Windows Admin".

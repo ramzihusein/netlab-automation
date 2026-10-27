@@ -61,7 +61,7 @@
 
     - name: Publish release v{{ app_version }}
       ansible.builtin.template:
-        src: linux/index.html.j2     # playbooks/templates/linux/index.html.j2
+        src: web/index.html.j2       # playbooks/templates/web/index.html.j2 (shared with Windows)
         dest: "{{ web_root }}/index.html"
         mode: "0644"
 

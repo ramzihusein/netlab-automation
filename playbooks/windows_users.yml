@@ -1,0 +1,56 @@
+---
+# Job Template: Windows - Manage Users
+# Purpose: Local users and groups as code, from vars/windows/users.yml.
+#          Onboarding = add an entry; offboarding = state: absent removes the
+#          account and its profile from every server.
+#
+# Required AAP Credentials: "NetLab Windows Admin"
+
+- name: Windows users and groups
+  hosts: windows
+  gather_facts: false
+
+  vars_files:
+    - ../vars/windows/users.yml
+
+  tasks:
+
+    - name: Groups
+      ansible.windows.win_group:
+        name: "{{ item.name }}"
+        description: "{{ item.description }}"
+      loop: "{{ user_groups }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: What each group is allowed to do
+      ansible.windows.win_group_membership:
+        name: "{{ item.1 }}"
+        members: ["{{ item.0.name }}"]
+      loop: "{{ user_groups | subelements('member_of') }}"
+      loop_control:
+        label: "{{ item.0.name }} -> {{ item.1 }}"
+
+    - name: Users
+      ansible.windows.win_user:
+        name: "{{ item.name }}"
+        fullname: "{{ item.fullname }}"
+        description: "{{ item.description }}"
+        groups: "{{ item.groups }}"
+        groups_action: add
+        # Only set when the account is created: random, nobody knows it.
+        password: "{{ lookup('ansible.builtin.password', '/dev/null', length=24, chars=['ascii_letters', 'digits', '!#%+=']) }}Aa1!"
+        update_password: on_create
+        password_never_expires: false
+        state: "{{ item.state }}"
+      loop: "{{ users }}"
+      loop_control:
+        label: "{{ item.name }} ({{ item.state }})"
+
+    - name: Offboarded users' profiles
+      ansible.windows.win_user_profile:
+        name: "{{ item.name }}"
+        state: absent
+      loop: "{{ users | selectattr('state', 'equalto', 'absent') | list }}"
+      loop_control:
+        label: "{{ item.name }}"

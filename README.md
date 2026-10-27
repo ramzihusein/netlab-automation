@@ -406,7 +406,7 @@ distribution in OS Version; see `vars/linux/servers.yml`):
    and EC2 instance ID back to the record, which marks it Installed. A rebuild
    updates the same records; it never creates duplicates.
    **NetBox owns the addresses**: a new server gets the next free IP from
-   the NetBox IP range "Linux demo servers" (10.0.1.33-62, seeded by Populate
+   the NetBox IP range "Demo servers" (10.0.1.33-62, seeded by Populate
    NetBox and reserved in the AWS subnet), recorded with its DNS name and tag
    `netlab-linux`. It keeps that IP across rebuilds; retiring the server gives
    it back.
@@ -455,3 +455,39 @@ Demo flow that works well:
 
 Gotcha: on Ubuntu, ufw resets `net.ipv4.conf.all.log_martians` when it starts,
 so the baseline doesn't manage it (it would show as drift on every run).
+
+## Windows configuration management
+
+One EC2 server, `win1` (Windows Server 2022, IIS), managed from AAP on the
+**Windows EE** (supported EE + `community.windows`, `community.aws`,
+`netbox.netbox`, `servicenow.itsm`). Same ownership as Linux: the **CMDB**
+owns the server (`cmdb_ci_win_server`, see `vars/windows/servers.yml`),
+**NetBox** gives it its address (same range, tag `netlab-windows`), and AAP
+builds and configures it. The inventory **Windows Servers**
+(`inventories/windows_servers.now.yml`) groups it into `windows` and `web`.
+
+AAP connects with **WinRM over HTTPS** (5986, NTLM) as the local admin
+`ansible`. The bootstrap generates its password into the credential
+**NetLab Windows Admin** (and `~/.netlab-windows.json`, for RDP). It never
+goes into EC2 user data: Provision stores it in **SSM Parameter Store** as a
+SecureString, and the server reads it at first boot through the IAM role
+`netlab-windows-server`, which may read that one parameter and nothing else.
+RDP (3389) and HTTP are open to `admin_cidrs`.
+
+| Job template | Playbook | Shows |
+|---|---|---|
+| Windows - Request Server in CMDB | `servicenow_request_server.yml` (`server_family: windows`) | Request or retire a Windows server in the CMDB |
+| Windows - Build Server (workflow) | — | Provision → security baseline → users → IIS site → report. Survey "brand-new servers?" |
+| Windows - Provision / Start Servers | `windows_provision.yml` | CMDB → NetBox IP → EC2 with IAM role → WinRM check → CMDB write-back |
+| Windows - Server Inventory Report | `windows_report.yml` | OS, uptime, size, disk, pending reboot, read-only |
+| Windows - Apply Security Baseline | `windows_baseline.yml` + `vars/windows/baseline.yml` | Computer name, time zone, SMB1/PowerShell 2 removed, Print Spooler off, SMB signing, RDP NLA, TLS 1.0/1.1 off, login banner, password + audit policy, firewall |
+| Windows - Check Baseline Drift | same, check + diff | What changed by hand |
+| Windows - Manage Users | `windows_users.yml` + `vars/windows/users.yml` | Local groups and users; offboard with `state: absent` |
+| Windows - Deploy IIS Site | `windows_webapp.yml` | Certified `microsoft.iis`: app pool + site, same release page as Linux. Watch http://win1.aap.ramzidev.com |
+| Windows - Patch Servers | `windows_patching.yml` | Windows Update: report / security / all, reboot if needed |
+| Windows - Manage a Service | `windows_service.yml` | Self-service status / restart / stop / start |
+
+Demo flow: run the build workflow (Windows takes ~10 min to boot the first
+time), open the page, then show drift: RDP in, start the Print Spooler or
+change the login banner, run Check Baseline Drift, then Apply Security
+Baseline.

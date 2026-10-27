@@ -1,0 +1,33 @@
+---
+# Job Template: Windows - Server Inventory Report
+# Purpose: What do we actually have? Ansible's facts give OS, uptime, size
+#          and disk use for every Windows server in one run, without
+#          anyone logging in. Changes nothing.
+#
+# Required AAP Credentials: "NetLab Windows Admin"
+
+- name: Windows server inventory report
+  hosts: windows
+
+  tasks:
+
+    - name: Disk space on drive C
+      ansible.windows.win_powershell:
+        script: |
+          $Ansible.Changed = $false
+          $d = Get-PSDrive C
+          @{ used_gb = [math]::Round($d.Used / 1GB, 1); total_gb = [math]::Round(($d.Used + $d.Free) / 1GB, 1) }
+      register: disk
+
+    - name: Server summary
+      ansible.builtin.debug:
+        msg:
+          - "OS:        {{ ansible_os_name }} ({{ ansible_distribution_version }})"
+          - "Up:        {{ (ansible_uptime_seconds / 86400) | round(1) }} days"
+          - "Size:      {{ ansible_processor_vcpus }} vCPU, {{ (ansible_memtotal_mb / 1024) | round(1) }} GB RAM"
+          - "Disk C:    {{ c.used_gb }} of {{ c.total_gb }} GB used"
+          - "Address:   {{ ansible_ip_addresses | ansible.utils.ipv4 | first }}"
+          - "Reboot pending: {{ ansible_reboot_pending }}"
+          - "Groups:    {{ group_names | join(', ') }}"
+      vars:
+        c: "{{ disk.output[0] }}"

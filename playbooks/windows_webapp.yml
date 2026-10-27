@@ -1,0 +1,84 @@
+---
+# Job Template: Windows - Deploy IIS Site
+# Purpose: Deploy a release to the Windows web servers with Red Hat's
+#          certified microsoft.iis collection: install IIS, an application
+#          pool and a site, publish the page, check it answers. Same release
+#          page and survey as Linux - Deploy Web App.
+#          Open http://win1.aap.ramzidev.com to watch it change.
+#
+# Survey: app_version, app_message, app_color
+#
+# Required AAP Credentials: "NetLab Windows Admin"
+
+- name: Deploy the IIS site
+  hosts: windows:&web
+  serial: 1                    # rolling deployment
+  max_fail_percentage: 0       # a server that fails its check stops the rollout
+
+  vars:
+    app_version: "1.0"
+    app_message: Hello from Ansible Automation Platform
+    app_color: blue
+    app_colors:
+      red: "#ee0000"
+      blue: "#0066cc"
+      green: "#3e8635"
+      purple: "#5e40be"
+    site_name: NetLab
+    site_root: C:\sites\netlab
+
+  tasks:
+
+    - name: IIS installed
+      ansible.windows.win_feature:
+        name: Web-Server
+        include_management_tools: true
+      register: iis
+
+    - name: Reboot if installing IIS needs it
+      ansible.windows.win_reboot:
+      when: iis.reboot_required
+
+    - name: The built-in site out of the way (it holds port 80)
+      microsoft.iis.website:
+        name: Default Web Site
+        state: stopped
+
+    - name: Site folder
+      ansible.windows.win_file:
+        path: "{{ site_root }}"
+        state: directory
+
+    - name: Application pool
+      microsoft.iis.web_app_pool:
+        name: "{{ site_name }}"
+        state: started
+
+    - name: Site on port 80
+      microsoft.iis.website:
+        name: "{{ site_name }}"
+        physical_path: "{{ site_root }}"
+        application_pool: "{{ site_name }}"
+        bindings:
+          set:
+            - {ip: "*", port: 80}
+        state: started
+
+    - name: Publish release v{{ app_version }}
+      ansible.windows.win_template:
+        src: web/index.html.j2       # playbooks/templates/web/index.html.j2 (shared with Linux)
+        dest: "{{ site_root }}\\index.html"
+
+    - name: Check the server answers with the new release before moving on
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}/"
+        return_content: true
+      register: page
+      until: ("Release v" ~ app_version) in page.content
+      retries: 5
+      delay: 3
+      delegate_to: localhost
+
+    - name: Live
+      ansible.builtin.debug:
+        msg: "http://{{ inventory_hostname }}.aap.ramzidev.com is serving v{{ app_version }}"
