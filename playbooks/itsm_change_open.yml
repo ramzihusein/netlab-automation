@@ -76,7 +76,7 @@
 
         - name: Send it for approval (Assess)
           servicenow.itsm.change_request:
-            number: "{{ change.record.number }}"
+            sys_id: "{{ change.record.sys_id }}"   # numbers can repeat on a developer instance
             assignment_group: "{{ change_assignment_group }}"   # the module wants it on every state change
             state: assess
 
@@ -94,7 +94,7 @@
 
         - name: Wait for the approvals (up to {{ (change_wait_retries * change_wait_delay / 60) | int }} minutes)
           servicenow.itsm.change_request_info:
-            number: "{{ change.record.number }}"
+            sys_id: "{{ change.record.sys_id }}"   # numbers can repeat on a developer instance
           register: status
           until: >-
             status.records[0].state in ['scheduled', 'implement', 'canceled', 'closed']
@@ -111,7 +111,7 @@
 
         - name: Cancel the change
           servicenow.itsm.change_request:
-            number: "{{ change.record.number }}"
+            sys_id: "{{ change.record.sys_id }}"   # numbers can repeat on a developer instance
             assignment_group: "{{ change_assignment_group }}"   # the module wants it on every state change
             state: canceled
             other:
@@ -133,7 +133,7 @@
 
     - name: Start the work (Implement)
       servicenow.itsm.change_request:
-        number: "{{ change.record.number }}"
+        sys_id: "{{ change.record.sys_id }}"   # numbers can repeat on a developer instance
         assignment_group: "{{ change_assignment_group }}"   # the module wants it on every state change
         state: implement
         other:

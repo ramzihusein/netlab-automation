@@ -35,7 +35,7 @@
 
     - name: Record the results
       servicenow.itsm.change_request:
-        number: "{{ change_number }}"
+        sys_id: "{{ change_sys_id }}"   # numbers can repeat on a developer instance
         assignment_group: "{{ change_assignment_group }}"   # the module wants it on every state change
         state: review
         other:
@@ -46,7 +46,7 @@
 
     - name: Close it as {{ change_outcome }}
       servicenow.itsm.change_request:
-        number: "{{ change_number }}"
+        sys_id: "{{ change_sys_id }}"   # numbers can repeat on a developer instance
         assignment_group: "{{ change_assignment_group }}"   # the module wants it on every state change
         state: closed
         close_code: "{{ change_outcome }}"
