@@ -1,0 +1,67 @@
+---
+# Job Template: ITSM - Close Change Request
+# Purpose: Last step of "Linux / Windows - Patch with Change Request": write
+#          what each server got into the change, move it through Review
+#          and close it as successful or unsuccessful.
+#
+# Inputs (passed along by the workflow):
+#   change_number, change_sys_id, change_servers   from ITSM - Open Change Request
+#   patch_results    {server: summary} from the patch job (missing if it failed early)
+#   change_outcome   successful / unsuccessful (set on the workflow node)
+#
+# Required AAP Credentials: "NetLab ServiceNow", "NetLab Mattermost"
+
+- name: Close the change request
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../vars/itsm.yml
+
+  vars:
+    change_outcome: successful
+    patch_results: {}
+    workflow_link: "{{ aap_url }}/execution/jobs/workflow/{{ awx_workflow_job_id | default('') }}/output"
+    results_text: |-
+      {% for server, result in patch_results.items() %}
+      {{ server }}: {{ result }}
+      {% else %}
+      No server reported a result.
+      {% endfor %}
+    not_done: "{{ change_servers | difference(patch_results.keys()) }}"
+
+  tasks:
+
+    - name: Record the results
+      servicenow.itsm.change_request:
+        number: "{{ change_number }}"
+        state: review
+        other:
+          work_notes: |-
+            Results from Ansible Automation Platform ({{ workflow_link }}):
+            {{ results_text }}
+            {% if not_done %}Not patched: {{ not_done | join(', ') }}{% endif %}
+
+    - name: Close it as {{ change_outcome }}
+      servicenow.itsm.change_request:
+        number: "{{ change_number }}"
+        state: closed
+        close_code: "{{ change_outcome }}"
+        close_notes: >-
+          {{ 'All servers patched and checked by AAP.' if change_outcome == 'successful'
+             else 'The rollout stopped at a failure; see the work notes and the incident.' }}
+
+    - name: Tell the team
+      ansible.builtin.include_tasks: tasks/chat_post.yml
+      vars:
+        chat_status: "{{ 'good' if change_outcome == 'successful' else 'bad' }}"
+        chat_title: "{{ change_number }} closed {{ change_outcome }}"
+        chat_link: "{{ sn_host }}/change_request.do?sys_id={{ change_sys_id }}"
+        chat_text: |-
+          {% for server, result in patch_results.items() %}
+          - **{{ server }}**: {{ result }}
+          {% endfor %}
+          {% if not_done %}- Not patched: {{ not_done | join(', ') }}{% endif %}
+        chat_fields:
+          - {title: AAP workflow, value: "[open]({{ workflow_link }})", short: true}

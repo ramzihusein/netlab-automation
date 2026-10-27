@@ -1,0 +1,69 @@
+---
+# Job Template: ITSM - Open Incident for Failed Patching
+# Purpose: When the patch job in "Linux / Windows - Patch with Change Request"
+#          fails, open an incident for the server(s) it didn't finish,
+#          linked to the change that caused it and to the AAP job, and post
+#          it to the team. Runs after the change has been closed unsuccessful.
+#
+# Inputs (passed along by the workflow): change_number, change_sys_id,
+#   change_servers, patch_results (see itsm_change_close.yml)
+#
+# Required AAP Credentials: "NetLab ServiceNow", "NetLab Mattermost"
+
+- name: Open an incident for the failed patching
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../vars/itsm.yml
+
+  vars:
+    patch_results: {}
+    failed_servers: "{{ change_servers | difference(patch_results.keys()) }}"
+    workflow_link: "{{ aap_url }}/execution/jobs/workflow/{{ awx_workflow_job_id | default('') }}/output"
+
+  tasks:
+
+    - name: Find the server in the CMDB
+      servicenow.itsm.configuration_item_info:
+        name: "{{ failed_servers[0] }}"
+      register: ci
+      when: failed_servers | length > 0
+
+    - name: Find the server team's group
+      servicenow.itsm.api_info:
+        resource: sys_user_group
+        sysparm_query: "name={{ incident_groups.server }}"
+        columns: [sys_id]
+      register: group
+
+    - name: Open the incident
+      servicenow.itsm.incident:
+        state: new
+        caller: "{{ incident_caller }}"
+        short_description: "Patching failed on {{ failed_servers | join(', ') | default('a server', true) }} ({{ change_number }})"
+        description: |-
+          Ansible Automation Platform stopped the patch rollout of {{ change_number }} at a failure.
+          Not finished: {{ failed_servers | join(', ') }}
+          Finished: {{ patch_results.keys() | join(', ') | default('none', true) }}
+          Job output: {{ workflow_link }}
+        impact: medium
+        urgency: high
+        other:
+          cmdb_ci: "{{ ci.records[0].sys_id | default('') if ci.records is defined and ci.records else '' }}"
+          caused_by: "{{ change_sys_id }}"
+          assignment_group: "{{ group.record[0].sys_id }}"
+          category: software
+      register: incident
+
+    - name: Tell the team
+      ansible.builtin.include_tasks: tasks/chat_post.yml
+      vars:
+        chat_status: bad
+        chat_title: "{{ incident.record.number }}: patching failed on {{ failed_servers | join(', ') }}"
+        chat_link: "{{ sn_host }}/incident.do?sys_id={{ incident.record.sys_id }}"
+        chat_text: "The rollout stopped at the first failure; the other servers weren't touched. Assigned to {{ incident_groups.server }}."
+        chat_fields:
+          - {title: Change, value: "[{{ change_number }}]({{ sn_host }}/change_request.do?sys_id={{ change_sys_id }})", short: true}
+          - {title: AAP workflow, value: "[open]({{ workflow_link }})", short: true}

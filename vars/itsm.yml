@@ -1,0 +1,34 @@
+---
+# ServiceNow ITSM + Mattermost settings shared by the itsm_*.yml playbooks.
+# Instance URL and logins come from the AAP credentials "NetLab ServiceNow"
+# (SN_HOST / SN_USERNAME / SN_PASSWORD) and "NetLab Mattermost" (chat_url,
+# chat_user, chat_password).
+
+aap_url: https://gateway.aap.ramzidev.com
+sn_host: "{{ lookup('ansible.builtin.env', 'SN_HOST') | regex_replace('/$', '') }}"
+
+# --- Change requests ----------------------------------------------------------
+# A Normal change moved to Assess asks its assignment group to approve; once
+# that's done ServiceNow moves it to Authorize, where the CAB Approval group
+# approves. Whoever approves in the demo must be a member of both groups.
+change_assignment_group: Change Management
+# How long "Open Change Request" waits for the approvals (180 x 10 s = 30 min).
+change_wait_retries: 180
+change_wait_delay: 10
+
+# --- Incidents ------------------------------------------------------------------
+incident_caller: aap.integration     # the ServiceNow user AAP logs in as
+incident_groups:
+  server: Software
+  network: Network
+
+# --- Chat -----------------------------------------------------------------------
+chat_team: netlab
+chat_channel: netlab-ops
+chat_public_url: http://chat.aap.ramzidev.com:8065
+# Attachment colours: what's happening / waiting / good / bad
+chat_colors:
+  info: "#2389d7"
+  waiting: "#f2c744"
+  good: "#3db887"
+  bad: "#d24b4e"

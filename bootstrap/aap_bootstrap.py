@@ -1030,6 +1030,165 @@ def windows_side(org_id, proj, creds, sn_cred):
     return inv, jts
 
 
+MATTERMOST_SECRETS = os.path.expanduser("~/.netlab-mattermost.json")
+
+
+def itsm_side(org_id, proj, netlab_ee_id, inv, creds, sn_cred, net_jts, linux, windows, start_wf):
+    """ServiceNow ITSM + Mattermost: patching under an approved change
+    request, self-heal with an incident, and a team channel AAP posts to.
+
+    Mattermost runs on the NetBox host (NetLab - Install Mattermost, also a
+    step of the Start workflow). AAP posts as "aap"; people log in as
+    "admin". Both passwords are generated here, kept in the credential
+    "NetLab Mattermost" and in ~/.netlab-mattermost.json."""
+    print("ITSM + Mattermost")
+    if not sn_cred:
+        print("  ! no ServiceNow credential: skipping ITSM")
+        return
+    ct, _ = ensure(f"{C}/credential_types/", "Mattermost Chat", {
+        "kind": "cloud",
+        "description": "Mattermost URL and the account AAP posts as (plus the admin login people use)",
+        "inputs": {"fields": [
+            {"id": "url", "label": "Mattermost URL (as AAP reaches it)", "type": "string"},
+            {"id": "username", "label": "AAP's chat user", "type": "string"},
+            {"id": "password", "label": "AAP's chat password", "type": "string", "secret": True},
+            {"id": "admin_password", "label": "Password of the 'admin' login", "type": "string", "secret": True},
+        ], "required": ["url", "username", "password"]},
+        "injectors": {"extra_vars": {
+            "chat_url": "{{ url }}", "chat_user": "{{ username }}", "chat_password": "{{ password }}",
+            "chat_admin_password": "{{ admin_password }}",
+        }},
+    })
+    cred = find(f"{C}/credentials/", "NetLab Mattermost")
+    if cred is None:
+        aap_pw, admin_pw = secrets.token_urlsafe(18), secrets.token_urlsafe(18)
+        cred, _ = ensure(f"{C}/credentials/", "NetLab Mattermost", {
+            "credential_type": ct["id"], "organization": org_id,
+            "description": "Team chat on the NetBox host (channel NetLab Ops)",
+            "inputs": {"url": "http://chat-int.aap.ramzidev.com:8065", "username": "aap",
+                       "password": aap_pw, "admin_password": admin_pw},
+        })
+        with open(MATTERMOST_SECRETS, "w") as f:
+            json.dump({"url": "http://chat.aap.ramzidev.com:8065", "admin_user": "admin",
+                       "admin_password": admin_pw}, f, indent=2)
+        print(f"  admin login written to {MATTERMOST_SECRETS}")
+    else:
+        print("  = credentials: NetLab Mattermost (secrets kept)")
+    chat = cred["id"]
+    ee_id = find(f"{C}/execution_environments/", EE)["id"]
+
+    def attach(jt, cred_ids):
+        have = {c["id"] for c in api("GET", f"{C}/job_templates/{jt['id']}/credentials/")["results"]}
+        for cid in cred_ids:
+            if cid and cid not in have:
+                api("POST", f"{C}/job_templates/{jt['id']}/credentials/", {"id": cid})
+
+    mm, _ = ensure(f"{C}/job_templates/", "NetLab - Install Mattermost", {
+        "job_type": "run", "organization": org_id, "project": proj["id"],
+        "playbook": "playbooks/11_install_mattermost.yml", "inventory": inv["infra"],
+        "execution_environment": ee_id,
+        "description": "NetLab demo: team chat (Mattermost) on the NetBox host",
+    })
+    attach(mm, [creds["ssh"], chat])
+    # Part of the Start workflow, once NetBox's host is up.
+    nodes_path = f"{C}/workflow_job_templates/{start_wf['id']}/workflow_nodes/"
+    existing = {n["identifier"]: n for n in api("GET", nodes_path + "?page_size=100")["results"]}
+    if "mattermost" not in existing and "netbox" in existing:
+        n = api("POST", nodes_path, {"unified_job_template": mm["id"], "identifier": "mattermost"})
+        api("POST", f"{C}/workflow_job_template_nodes/{existing['netbox']['id']}/success_nodes/", {"id": n["id"]})
+        print("  + workflow node: NetLab - Start -> Install Mattermost")
+
+    specs = [
+        ("ITSM - Open Change Request", "playbooks/itsm_change_open.yml", linux[0]["id"],
+         {"ask_inventory_on_launch": True, "ask_limit_on_launch": True, "ask_variables_on_launch": True}),
+        ("ITSM - Close Change Request", "playbooks/itsm_change_close.yml", inv["local"],
+         {"ask_variables_on_launch": True}),
+        ("ITSM - Open Incident for Failed Patching", "playbooks/itsm_incident_patch_failed.yml", inv["local"],
+         {"ask_variables_on_launch": True}),
+        ("ITSM - Self-Heal Incident", "playbooks/itsm_self_heal_incident.yml", inv["local"],
+         {"ask_variables_on_launch": True}),
+    ]
+    jts = {}
+    for name, playbook, inventory, extra in specs:
+        jt, _ = ensure(f"{C}/job_templates/", name, dict({
+            "job_type": "run", "organization": org_id, "project": proj["id"], "playbook": playbook,
+            "inventory": inventory, "execution_environment": netlab_ee_id,
+            "description": f"ITSM demo: {playbook}",
+        }, **extra))
+        attach(jt, [sn_cred["id"], chat])
+        jts[name] = jt
+    # The patch jobs post each server's result to the channel.
+    for family, label in ((linux, "Linux"), (windows, "Windows")):
+        if family:
+            attach(family[1][f"{label} - Patch Servers"], [chat])
+
+    def choice(question, variable, choices, default, description=""):
+        return {"question_name": question, "question_description": description, "variable": variable,
+                "type": "multiplechoice", "choices": choices, "default": default, "required": True}
+
+    def new_workflow(name, description, spec=None, **extra):
+        wf, _ = ensure(f"{C}/workflow_job_templates/", name, dict({
+            "organization": org_id, "description": description, "survey_enabled": bool(spec)}, **extra))
+        if spec:
+            api("POST", f"{C}/workflow_job_templates/{wf['id']}/survey_spec/",
+                {"name": name, "description": "", "spec": spec})
+        nodes = f"{C}/workflow_job_templates/{wf['id']}/workflow_nodes/"
+        if api("GET", nodes)["count"]:
+            print("  = workflow nodes exist")
+            return wf, None
+        return wf, nodes
+
+    def build(nodes, spec, links):
+        ids = {}
+        for ident, jt, extra in spec:
+            body = {"identifier": ident, "unified_job_template": jt["id"]}
+            body.update(extra)
+            ids[ident] = api("POST", nodes, body)["id"]
+        for parent, kind, child in links:
+            api("POST", f"{C}/workflow_job_template_nodes/{ids[parent]}/{kind}_nodes/", {"id": ids[child]})
+        print("  + workflow nodes")
+
+    # Patching under a change request: nothing runs until ServiceNow approves.
+    for family, label in ((linux, "Linux"), (windows, "Windows")):
+        if not family:
+            continue
+        wf, nodes = new_workflow(
+            f"{label} - Patch with Change Request",
+            "Normal change in ServiceNow -> wait for approval -> rolling patch -> results into the change, "
+            "close it; an incident if patching fails. Every step posted to Mattermost. "
+            "Use the limit to pick servers.",
+            [choice("Patch scope", "patch_scope", ["security", "all"], "security",
+                    "security = security updates; all = every update"),
+             choice("Reboot", "reboot_policy", ["if_needed", "never"], "if_needed",
+                    "if_needed = reboot only when an update requires it")],
+            ask_limit_on_launch=True)
+        if nodes:
+            build(nodes, [
+                ("change", jts["ITSM - Open Change Request"], {"inventory": family[0]["id"]}),
+                ("patch", family[1][f"{label} - Patch Servers"], {}),
+                ("close", jts["ITSM - Close Change Request"], {"extra_data": {"change_outcome": "successful"}}),
+                ("close-failed", jts["ITSM - Close Change Request"],
+                 {"extra_data": {"change_outcome": "unsuccessful"}}),
+                ("incident", jts["ITSM - Open Incident for Failed Patching"], {}),
+            ], [("change", "success", "patch"), ("patch", "success", "close"),
+                ("patch", "failure", "close-failed"), ("close-failed", "always", "incident")])
+
+    # EDA (rulebooks/device_syslog.yml) launches this with limit = the device.
+    wf, nodes = new_workflow(
+        "NetLab - Self-Heal with Incident",
+        "Device changed by hand (EDA): incident In Progress -> put NetBox's config back -> resolve it "
+        "(or escalate if that fails). Every step posted to Mattermost.",
+        ask_limit_on_launch=True, ask_variables_on_launch=True)
+    if nodes:
+        incident = jts["ITSM - Self-Heal Incident"]
+        build(nodes, [
+            ("incident", incident, {"extra_data": {"incident_action": "open"}}),
+            ("heal", net_jts["NetLab - Self-Heal Device"], {}),
+            ("resolve", incident, {"extra_data": {"incident_action": "resolve"}}),
+            ("escalate", incident, {"extra_data": {"incident_action": "escalate"}}),
+        ], [("incident", "success", "heal"), ("heal", "success", "resolve"), ("heal", "failure", "escalate")])
+
+
 def remediate_workflow(org_id, jts):
     """Show the drift, approve, put NetBox's config back, prove it's in sync.
     Also the quick way to reset the lab after a demo."""
@@ -1285,8 +1444,9 @@ def main():
     vlan_wf = vlan_workflow(org_id, jts)
     remediate_workflow(org_id, jts)
     sn_cred = servicenow_side(org_id, proj, netlab_ee["id"], devices["id"])
-    linux_side(org_id, proj, creds, sn_cred)
-    windows_side(org_id, proj, creds, sn_cred)
+    linux = linux_side(org_id, proj, creds, sn_cred)
+    windows = windows_side(org_id, proj, creds, sn_cred)
+    itsm_side(org_id, proj, netlab_ee["id"], inv, creds, sn_cred, jts, linux, windows, wf)
     rbac(jts, [vlan_wf["id"]], inv, a.secrets_out)
     if not a.skip_eda:
         print("EDA project + rulebook activations")
@@ -1300,7 +1460,7 @@ def main():
                               "NetBox changes via AWS EventBridge/SQS -> NetLab - Configure Devices",
                               recreate=a.recreate_activations)
         ensure_activation(eda_org_id, eproj, "NetLab Self-Heal", "device_syslog.yml",
-                          [aap_cred["id"]], "Device changed by hand (syslog) -> NetLab - Self-Heal Device",
+                          [aap_cred["id"]], "Device changed by hand (syslog) -> NetLab - Self-Heal with Incident",
                           stream=syslog_stream, recreate=a.recreate_activations)
 
     print("\nDone.")

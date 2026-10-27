@@ -7,7 +7,9 @@
 # Event: {device, source_ip, message}, where message is the device's
 #   %SYS-5-CONFIG_I: Configured from console by admin on vty3 (172.20.20.1)
 #
-# Someone changed a device by hand -> put it back the way NetBox says.
+# Someone changed a device by hand -> put it back the way NetBox says, with a
+# ServiceNow incident opened, then resolved (or escalated if the fix fails),
+# and each step posted to the team's Mattermost channel.
 
 - name: Self-heal out-of-band changes
   hosts: all
@@ -33,8 +35,8 @@
         group_by_attributes:
           - event.payload.device
       action:
-        run_job_template:
-          name: NetLab - Self-Heal Device
+        run_workflow_template:
+          name: NetLab - Self-Heal with Incident
           organization: Default
           job_args:
             limit: "{{ event.payload.device }}"

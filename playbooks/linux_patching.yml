@@ -11,13 +11,16 @@
 #   reboot_policy  if_needed = reboot when the kernel or core libraries changed
 #                  never = leave it for a maintenance window
 #
-# Required AAP Credentials: "EC2" (SSH key)
+# Required AAP Credentials: "EC2" (SSH key); optional "NetLab Mattermost" (posts each server's result)
 
 - name: Patch servers
   hosts: all
   become: true
   serial: 1                    # rolling: one server at a time
   max_fail_percentage: 0       # stop the rollout at the first failure
+
+  vars_files:
+    - ../vars/itsm.yml           # chat settings (posts only with the Mattermost credential)
 
   vars:
     patch_scope: report
@@ -130,3 +133,23 @@
           - "Updated: {{ (patched_rhel is changed) or (patched_ubuntu is changed) or (patched_ubuntu_security is changed) }}"
           - "Rebooted: {{ rebooted is changed }}"
           - "Kernel: {{ kernel.stdout }}"
+
+    # --- Report (the change request and the team's chat) -----------------------
+
+    - name: Hand the result to the change request (Patch with Change Request workflow)
+      ansible.builtin.set_stats:
+        data:
+          patch_results: "{{ {inventory_hostname: summary} }}"
+      vars:
+        summary: >-
+          {{ patch_scope }} updates {{ 'applied' if (patched_rhel is changed) or (patched_ubuntu is changed)
+             or (patched_ubuntu_security is changed) else 'none needed' }},
+          {{ 'rebooted' if rebooted is changed else 'no reboot' }}, kernel {{ kernel.stdout }}, services OK
+
+    - name: Tell the team
+      ansible.builtin.include_tasks: tasks/chat_post.yml
+      when: patch_scope != 'report'
+      vars:
+        chat_status: good
+        chat_title: "{{ inventory_hostname }} patched"
+        chat_text: "{{ patch_scope }} updates, {{ 'rebooted' if rebooted is changed else 'no reboot' }}, kernel {{ kernel.stdout }}, services OK"

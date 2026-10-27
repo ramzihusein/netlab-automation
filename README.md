@@ -491,3 +491,39 @@ Demo flow: run the build workflow (Windows takes ~10 min to boot the first
 time), open the page, then show drift: RDP in, start the Print Spooler or
 change the login banner, run Check Baseline Drift, then Apply Security
 Baseline.
+
+## ITSM (ServiceNow change requests + incidents) and team chat (Mattermost)
+
+AAP works the way an ITSM team expects: changes go through a ServiceNow
+**change request** that people approve in ServiceNow, failures and fixes are
+**incidents**, and everything is posted to a **Mattermost** channel as it
+happens. Settings are in `vars/itsm.yml`.
+
+**Mattermost** (open source Team Edition) runs in Docker on the NetBox host:
+http://chat.aap.ramzidev.com:8065 (admin CIDRs only), team `netlab`,
+channel **NetLab Ops**. People log in as `admin`; AAP posts as `aap`. The
+bootstrap generates both passwords into the credential **NetLab Mattermost**
+and writes the admin login to `~/.netlab-mattermost.json`. Job template
+**NetLab - Install Mattermost** (`11_install_mattermost.yml`) installs it and
+is part of the Start workflow. Posts come from `playbooks/tasks/chat_post.yml`
+and never fail a job.
+
+| Workflow / job template | Playbook | Shows |
+|---|---|---|
+| Linux / Windows - Patch with Change Request (workflows) | — | Normal change → approval in ServiceNow → rolling patch → results into the change, closed successful; on failure closed unsuccessful + incident. Survey: scope, reboot; the limit picks servers |
+| ITSM - Open Change Request | `itsm_change_open.yml` | Raises the change (plans, affected CIs from the CMDB), sends it to Assess, waits up to 30 min for approval; rejected or no answer → cancelled, nothing runs |
+| ITSM - Close Change Request | `itsm_change_close.yml` | Per-server results into the work notes, Review → Closed |
+| ITSM - Open Incident for Failed Patching | `itsm_incident_patch_failed.yml` | Incident on the server that failed, linked to the change ("caused by") |
+| NetLab - Self-Heal with Incident (workflow, started by EDA) | — | Device changed by hand → incident In Progress → NetBox config put back → incident resolved (escalated if the fix fails) |
+| ITSM - Self-Heal Incident | `itsm_self_heal_incident.yml` | The open / resolve / escalate steps |
+
+Approvals: a Normal change in Assess is approved by its assignment group
+(**Change Management**), then in Authorize by **CAB Approval**. Whoever
+approves in the demo must be a member of both groups (one-time: add your
+ServiceNow admin user to them). Approve from the change's **Approvers** tab
+or *Self-Service → My Approvals*.
+
+Demo flow: open Mattermost next to ServiceNow, launch **Windows - Patch with
+Change Request** (limit `win1`), approve the change twice, watch the channel
+and the change fill in. For self-heal, change a device by hand and watch the
+incident open and resolve itself.

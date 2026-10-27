@@ -1,0 +1,61 @@
+---
+# Post a message card to the Mattermost channel (vars/itsm.yml chat_team /
+# chat_channel), as the AAP chat user from the "NetLab Mattermost" credential.
+# Does nothing without that credential, and never fails the job: chat is
+# a nice-to-have next to the change request, not part of the change.
+#
+# Inputs:
+#   chat_title   bold first line          chat_link    makes the title a link
+#   chat_text    body (Markdown)          chat_status  info / waiting / good / bad
+#   chat_fields  optional list of {title, value, short}
+
+- name: Post to Mattermost
+  when: chat_url is defined
+  delegate_to: localhost
+  block:
+
+    - name: Log in to Mattermost
+      ansible.builtin.uri:
+        url: "{{ chat_url }}/api/v4/users/login"
+        method: POST
+        body_format: json
+        body: {login_id: "{{ chat_user }}", password: "{{ chat_password }}"}
+      register: chat_login
+      when: chat_token is not defined
+      no_log: true
+
+    - name: Remember the session and the channel
+      ansible.builtin.set_fact:
+        chat_token: "{{ chat_login.token }}"
+        chat_channel_id: >-
+          {{ (lookup('ansible.builtin.url',
+                     chat_url ~ '/api/v4/teams/name/' ~ chat_team ~ '/channels/name/' ~ chat_channel,
+                     headers={'Authorization': 'Bearer ' ~ chat_login.token}) | from_json).id }}
+      when: chat_token is not defined
+      no_log: true
+
+    - name: "Chat: {{ chat_title }}"
+      ansible.builtin.uri:
+        url: "{{ chat_url }}/api/v4/posts"
+        method: POST
+        status_code: 201
+        headers:
+          Authorization: "Bearer {{ chat_token }}"
+        body_format: json
+        body:
+          channel_id: "{{ chat_channel_id }}"
+          message: ""
+          props:
+            attachments:
+              - fallback: "{{ chat_title }}"
+                color: "{{ chat_colors[chat_status | default('info')] }}"
+                title: "{{ chat_title }}"
+                title_link: "{{ chat_link | default('') }}"
+                text: "{{ chat_text | default('') }}"
+                fields: "{{ chat_fields | default([]) }}"
+                footer: "Ansible Automation Platform"
+
+  rescue:
+    - name: Chat is down; carry on
+      ansible.builtin.debug:
+        msg: "Couldn't post to Mattermost ({{ ansible_failed_result.msg | default('error') }}); the job continues."

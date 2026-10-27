@@ -1,0 +1,156 @@
+---
+# Job Template: ITSM - Open Change Request
+# Purpose: First step of "Linux / Windows - Patch with Change Request": raise
+#          a Normal change in ServiceNow for the servers about to be patched,
+#          send it for approval, and wait. Nothing is touched until people
+#          approve it in ServiceNow (assignment group, then CAB).
+#          Approved: the change moves to Implement and the patch job runs.
+#          Rejected, or no answer in 30 minutes: the change is cancelled and
+#          the workflow stops.
+#
+# Runs against the servers the workflow targets (its limit), but only talks
+# to ServiceNow and Mattermost; it never connects to the servers.
+# Hands change_number / change_sys_id / change_servers to the next steps.
+#
+# Required AAP Credentials: "NetLab ServiceNow", "NetLab Mattermost"
+
+- name: Open a change request and wait for its approval
+  hosts: all
+  gather_facts: false
+
+  vars_files:
+    - ../vars/itsm.yml
+
+  vars:
+    patch_scope: security
+    reboot_policy: if_needed
+    servers: "{{ ansible_play_hosts | sort }}"
+    workflow_link: "{{ aap_url }}/execution/jobs/workflow/{{ awx_workflow_job_id | default('') }}/output"
+
+  tasks:
+
+    - name: Raise the change and wait for approval
+      run_once: true
+      delegate_to: localhost
+      block:
+
+        - name: Find the servers in the CMDB
+          servicenow.itsm.configuration_item_info:
+            sysparm_query: "nameIN{{ servers | join(',') }}^short_description=NetLab demo server"
+          register: cis
+
+        - name: Raise a Normal change
+          servicenow.itsm.change_request:
+            type: normal
+            state: new
+            assignment_group: "{{ change_assignment_group }}"
+            short_description: "Patch {{ servers | join(', ') }} ({{ patch_scope }} updates)"
+            description: |-
+              Apply {{ patch_scope }} operating system updates to {{ servers | join(', ') }}, one server at a time.
+              Reboot: {{ 'when an update requires it' if reboot_policy == 'if_needed' else 'none (left for a later window)' }}.
+              Raised and carried out by Ansible Automation Platform: {{ workflow_link }}
+            risk: moderate
+            impact: low
+            other:
+              cmdb_ci: "{{ cis.records[0].sys_id if cis.records else '' }}"
+              justification: Keep the servers on supported, patched packages.
+              implementation_plan: >-
+                AAP patches one server at a time, reboots if needed and checks
+                the services come back. The rollout stops at the first failure.
+              backout_plan: >-
+                Stop the rollout (automatic on failure); restore the affected
+                server from its last snapshot or reinstall the previous packages.
+              test_plan: Services checked by AAP after each server; results added to this change.
+          register: change
+
+        - name: List every server as an affected CI
+          servicenow.itsm.api:
+            resource: task_ci
+            action: post
+            data:
+              task: "{{ change.record.sys_id }}"
+              ci_item: "{{ item.sys_id }}"
+          loop: "{{ cis.records[1:] }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: Send it for approval (Assess)
+          servicenow.itsm.change_request:
+            number: "{{ change.record.number }}"
+            state: assess
+
+        - name: Tell the team it's waiting
+          ansible.builtin.include_tasks: tasks/chat_post.yml
+          vars:
+            chat_status: waiting
+            chat_title: "{{ change.record.number }} is waiting for approval"
+            chat_link: "{{ sn_host }}/change_request.do?sys_id={{ change.record.sys_id }}"
+            chat_text: "Patch **{{ servers | join(', ') }}** ({{ patch_scope }} updates). Approve it in ServiceNow and AAP starts right away."
+            chat_fields:
+              - {title: Servers, value: "{{ servers | join(', ') }}", short: true}
+              - {title: Reboot, value: "{{ reboot_policy }}", short: true}
+              - {title: AAP workflow, value: "[open]({{ workflow_link }})", short: true}
+
+        - name: Wait for the approvals (up to {{ (change_wait_retries * change_wait_delay / 60) | int }} minutes)
+          servicenow.itsm.change_request_info:
+            number: "{{ change.record.number }}"
+          register: status
+          until: >-
+            status.records[0].state in ['scheduled', 'implement', 'canceled', 'closed']
+            or status.records[0].approval == 'rejected'
+          retries: "{{ change_wait_retries }}"
+          delay: "{{ change_wait_delay }}"
+
+        - name: Approved?
+          ansible.builtin.assert:
+            that: status.records[0].state in ['scheduled', 'implement']
+            fail_msg: "{{ change.record.number }} was not approved ({{ status.records[0].state }}, approval {{ status.records[0].approval }})"
+
+      rescue:
+
+        - name: Cancel the change
+          servicenow.itsm.change_request:
+            number: "{{ change.record.number }}"
+            state: canceled
+            other:
+              work_notes: "Not approved in time, or rejected. Nothing was changed. AAP: {{ workflow_link }}"
+          when: change.record is defined
+          failed_when: false
+
+        - name: Tell the team nothing happens
+          ansible.builtin.include_tasks: tasks/chat_post.yml
+          vars:
+            chat_status: bad
+            chat_title: "{{ change.record.number | default('Change request') }} not approved: nothing was patched"
+            chat_link: "{{ sn_host }}/change_request.do?sys_id={{ change.record.sys_id | default('') }}"
+            chat_text: "{{ ansible_failed_result.msg | default('') }}"
+
+        - name: Stop the workflow
+          ansible.builtin.fail:
+            msg: "{{ ansible_failed_result.msg | default('Change request failed') }}"
+
+    - name: Start the work (Implement)
+      servicenow.itsm.change_request:
+        number: "{{ change.record.number }}"
+        state: implement
+        other:
+          work_notes: "Approved. AAP is starting the work: {{ workflow_link }}"
+      run_once: true
+      delegate_to: localhost
+
+    - name: Tell the team it's starting
+      ansible.builtin.include_tasks: tasks/chat_post.yml
+      run_once: true
+      vars:
+        chat_status: info
+        chat_title: "{{ change.record.number }} approved: patching {{ servers | join(', ') }}"
+        chat_link: "{{ workflow_link }}"
+        chat_text: "One server at a time; the results go into the change request."
+
+    - name: Hand the change to the next steps
+      ansible.builtin.set_stats:
+        data:
+          change_number: "{{ change.record.number }}"
+          change_sys_id: "{{ change.record.sys_id }}"
+          change_servers: "{{ servers }}"
+      run_once: true

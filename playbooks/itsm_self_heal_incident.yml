@@ -1,0 +1,128 @@
+---
+# Job Template: ITSM - Self-Heal Incident
+# Purpose: The ServiceNow side of "NetLab - Self-Heal with Incident" (started
+#          by EDA when someone changes a device by hand):
+#            open      incident for the device, In Progress, with the syslog
+#                      line that triggered it
+#            resolve   self-heal put NetBox's config back: resolve it
+#            escalate  self-heal failed: hand it to the network team
+#          Every step is posted to the team's chat.
+#
+# Inputs: ansible_eda.event.payload {device, source_ip, message} from EDA,
+#   or `device` when launched by hand; incident_action (set on the workflow
+#   node); incident_number / incident_sys_id from the open step.
+#
+# Required AAP Credentials: "NetLab ServiceNow", "NetLab Mattermost"
+
+- name: Self-heal incident
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../vars/itsm.yml
+
+  vars:
+    incident_action: open
+    event: "{{ ansible_eda.event.payload | default({}) }}"
+    device: "{{ event.device | default('unknown device') }}"
+    trigger: "{{ event.message | default('a configuration change made outside AAP') }}"
+    workflow_link: "{{ aap_url }}/execution/jobs/workflow/{{ awx_workflow_job_id | default('') }}/output"
+    incident_link: "{{ sn_host }}/incident.do?sys_id={{ incident_sys_id | default('') }}"
+
+  tasks:
+
+    - name: Open the incident
+      when: incident_action == 'open'
+      block:
+
+        - name: Find the device in the CMDB
+          servicenow.itsm.configuration_item_info:
+            sys_class_name: cmdb_ci_ip_switch
+            name: "{{ device }}"
+          register: ci
+
+        - name: Find the network team's group
+          servicenow.itsm.api_info:
+            resource: sys_user_group
+            sysparm_query: "name={{ incident_groups.network }}"
+            columns: [sys_id]
+          register: group
+
+        - name: Open it, already being worked by AAP
+          servicenow.itsm.incident:
+            state: in_progress
+            caller: "{{ incident_caller }}"
+            short_description: "{{ device }} changed outside automation; restoring the NetBox config"
+            description: |-
+              {{ device }} logged a configuration change that didn't come from Ansible Automation Platform:
+              {{ trigger }}
+              Event-Driven Ansible started a self-heal to put back the configuration NetBox defines.
+              Job output: {{ workflow_link }}
+            impact: medium
+            urgency: medium
+            other:
+              cmdb_ci: "{{ ci.records[0].sys_id if ci.records else '' }}"
+              assignment_group: "{{ group.record[0].sys_id }}"
+              category: network
+          register: incident
+
+        - name: Hand the incident to the next steps
+          ansible.builtin.set_stats:
+            data:
+              incident_number: "{{ incident.record.number }}"
+              incident_sys_id: "{{ incident.record.sys_id }}"
+
+        - name: Tell the team
+          ansible.builtin.include_tasks: tasks/chat_post.yml
+          vars:
+            chat_status: waiting
+            chat_title: "{{ incident.record.number }}: {{ device }} changed by hand, self-healing"
+            chat_link: "{{ sn_host }}/incident.do?sys_id={{ incident.record.sys_id }}"
+            chat_text: "`{{ trigger }}`"
+            chat_fields:
+              - {title: Device, value: "{{ device }}", short: true}
+              - {title: AAP workflow, value: "[open]({{ workflow_link }})", short: true}
+
+    - name: Resolve the incident
+      when: incident_action == 'resolve'
+      block:
+
+        - name: Resolve it
+          servicenow.itsm.incident:
+            number: "{{ incident_number }}"
+            state: resolved
+            close_code: Solution provided
+            close_notes: >-
+              Event-Driven Ansible restored the configuration NetBox defines on
+              {{ device }}. Job output: {{ workflow_link }}
+
+        - name: Tell the team
+          ansible.builtin.include_tasks: tasks/chat_post.yml
+          vars:
+            chat_status: good
+            chat_title: "{{ incident_number }} resolved: {{ device }} is back to the NetBox config"
+            chat_link: "{{ incident_link }}"
+            chat_text: "Fixed without anyone logging in. To change {{ device }}, change NetBox."
+
+    - name: Escalate the incident
+      when: incident_action == 'escalate'
+      block:
+
+        - name: Escalate it to the network team
+          servicenow.itsm.incident:
+            number: "{{ incident_number }}"
+            state: in_progress
+            urgency: high
+            other:
+              work_notes: "Self-heal FAILED; {{ device }} still differs from NetBox. Needs an engineer. Job output: {{ workflow_link }}"
+
+        - name: Tell the team
+          ansible.builtin.include_tasks: tasks/chat_post.yml
+          vars:
+            chat_status: bad
+            chat_title: "{{ incident_number }}: self-heal failed on {{ device }}, needs an engineer"
+            chat_link: "{{ incident_link }}"
+            chat_text: "Urgency raised to high and left with {{ incident_groups.network }}."
+            chat_fields:
+              - {title: AAP workflow, value: "[open]({{ workflow_link }})", short: true}

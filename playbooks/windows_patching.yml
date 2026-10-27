@@ -10,13 +10,16 @@
 #   reboot_policy  if_needed = reboot when an update requires it
 #                  never = leave it for a maintenance window
 #
-# Required AAP Credentials: "NetLab Windows Admin"
+# Required AAP Credentials: "NetLab Windows Admin"; optional "NetLab Mattermost" (posts each server's result)
 
 - name: Patch Windows servers
   hosts: windows
   gather_facts: false
   serial: 1                    # rolling: one server at a time
   max_fail_percentage: 0       # stop the rollout at the first failure
+
+  vars_files:
+    - ../vars/itsm.yml           # chat settings (posts only with the Mattermost credential)
 
   vars:
     patch_scope: report
@@ -43,3 +46,25 @@
           - "{{ updates.installed_update_count | default(0) }} installed, {{ updates.failed_update_count | default(0) }} failed"
           - "{{ updates.updates.values() | map(attribute='title') | list }}"
           - "Reboot still needed: {{ updates.reboot_required }}"
+
+    # --- Report (the change request and the team's chat) -----------------------
+
+    - name: Hand the result to the change request (Patch with Change Request workflow)
+      ansible.builtin.set_stats:
+        data:
+          patch_results: "{{ {inventory_hostname: summary} }}"
+      vars:
+        summary: >-
+          {{ updates.installed_update_count | default(0) }} {{ patch_scope }} update(s) installed,
+          {{ updates.failed_update_count | default(0) }} failed,
+          {{ 'reboot still needed' if updates.reboot_required else 'no reboot pending' }}
+
+    - name: Tell the team
+      ansible.builtin.include_tasks: tasks/chat_post.yml
+      when: patch_scope != 'report'
+      vars:
+        chat_status: good
+        chat_title: "{{ inventory_hostname }} patched"
+        chat_text: >-
+          {{ updates.installed_update_count | default(0) }} {{ patch_scope }} update(s) installed,
+          {{ 'reboot still needed' if updates.reboot_required else 'no reboot pending' }}

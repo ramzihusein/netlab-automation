@@ -1,0 +1,180 @@
+---
+# Job Template: NetLab - Install Mattermost
+# Purpose: Team chat for the ITSM demo. Mattermost Team Edition (open source)
+#          runs in Docker on the NetBox host, with a team "netlab" and a
+#          channel "netlab-ops" where AAP posts change requests, incidents
+#          and what it's doing. Browse to http://chat.<dns_zone>:8065 (admin
+#          CIDRs only) and log in as "admin".
+#
+# Required AAP Credentials: "EC2" (SSH key), "NetLab Mattermost", which injects
+#   chat_user / chat_password (the account AAP posts as) and
+#   chat_admin_password (the "admin" login for people)
+
+- name: NetLab — install Mattermost
+  hosts: role_netbox
+  become: true
+
+  vars_files:
+    - ../vars/netlab.yml
+    - ../vars/itsm.yml
+
+  vars:
+    mattermost_image: mattermost/mattermost-team-edition:10.11.4   # Extended Support Release
+    mattermost_dir: /opt/mattermost
+    mattermost_port: 8065
+    mmctl: docker exec mattermost mmctl --local
+    chat_accounts:
+      - {name: admin, password: "{{ chat_admin_password }}", admin: true}
+      - {name: "{{ chat_user }}", password: "{{ chat_password }}", admin: false}
+
+  tasks:
+
+    - name: Install Docker
+      ansible.builtin.include_tasks: tasks/docker.yml
+
+    - name: Create the Mattermost directories
+      ansible.builtin.file:
+        path: "{{ mattermost_dir }}/{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.owner }}"
+        mode: "0750"
+      loop:
+        - {path: "", owner: root}
+        - {path: postgres, owner: "70"}       # postgres user in the alpine image
+        - {path: config, owner: "2000"}       # mattermost user in its image
+        - {path: data, owner: "2000"}
+        - {path: logs, owner: "2000"}
+        - {path: plugins, owner: "2000"}
+        - {path: client-plugins, owner: "2000"}
+
+    - name: Database password (generated once, stays on this host)
+      ansible.builtin.shell: |
+        test -s {{ mattermost_dir }}/.db_password || openssl rand -hex 24 > {{ mattermost_dir }}/.db_password
+        chmod 600 {{ mattermost_dir }}/.db_password
+        cat {{ mattermost_dir }}/.db_password
+      register: db_password
+      changed_when: false
+      no_log: true
+
+    - name: Define the Mattermost stack
+      ansible.builtin.copy:
+        dest: "{{ mattermost_dir }}/compose.yml"
+        mode: "0600"
+        content: |
+          services:
+            postgres:
+              image: postgres:16-alpine
+              restart: unless-stopped
+              environment:
+                POSTGRES_USER: mmuser
+                POSTGRES_PASSWORD: {{ db_password.stdout }}
+                POSTGRES_DB: mattermost
+              volumes:
+                - {{ mattermost_dir }}/postgres:/var/lib/postgresql/data
+            mattermost:
+              image: {{ mattermost_image }}
+              container_name: mattermost
+              restart: unless-stopped
+              depends_on: [postgres]
+              ports:
+                - "{{ mattermost_port }}:8065"
+              environment:
+                TZ: UTC
+                MM_SQLSETTINGS_DRIVERNAME: postgres
+                MM_SQLSETTINGS_DATASOURCE: postgres://mmuser:{{ db_password.stdout }}@postgres:5432/mattermost?sslmode=disable&connect_timeout=10
+                MM_SERVICESETTINGS_SITEURL: {{ chat_public_url }}
+                # mmctl --local (below) works over a socket inside the container only
+                MM_SERVICESETTINGS_ENABLELOCALMODE: "true"
+                MM_SERVICESETTINGS_ENABLEUSERACCESSTOKENS: "true"
+                MM_EMAILSETTINGS_REQUIREEMAILVERIFICATION: "false"
+                MM_EMAILSETTINGS_SENDEMAILNOTIFICATIONS: "false"
+                MM_TEAMSETTINGS_ENABLEOPENSERVER: "false"
+                MM_LOGSETTINGS_ENABLEDIAGNOSTICS: "false"
+                MM_PLUGINSETTINGS_ENABLEUPLOADS: "false"
+              volumes:
+                - {{ mattermost_dir }}/config:/mattermost/config
+                - {{ mattermost_dir }}/data:/mattermost/data
+                - {{ mattermost_dir }}/logs:/mattermost/logs
+                - {{ mattermost_dir }}/plugins:/mattermost/plugins
+                - {{ mattermost_dir }}/client-plugins:/mattermost/client/plugins
+      no_log: true
+
+    - name: Start Mattermost
+      ansible.builtin.command: docker compose -f {{ mattermost_dir }}/compose.yml up -d
+      register: up
+      changed_when: "'Started' in up.stderr or 'Created' in up.stderr or 'Recreated' in up.stderr"
+
+    - name: Wait for Mattermost to answer
+      ansible.builtin.uri:
+        url: "http://localhost:{{ mattermost_port }}/api/v4/system/ping"
+      register: ping
+      until: ping.status == 200
+      retries: 30
+      delay: 5
+
+    # ------------------------------------------------------- users and channel
+    - name: Which users exist
+      ansible.builtin.command: "{{ mmctl }} user list --all --json"
+      register: users
+      changed_when: false
+
+    - name: Create the users (admin for people, {{ chat_user }} for AAP)
+      ansible.builtin.command: >-
+        {{ mmctl }} user create --username {{ item.name }} --email {{ item.name }}@netlab.local
+        --password '{{ item.password }}' {{ '--system-admin' if item.admin else '' }}
+      loop: "{{ chat_accounts }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: item.name not in (users.stdout | from_json | map(attribute='username') | list)
+      no_log: true
+
+    - name: Keep their passwords in step with the credential
+      ansible.builtin.command: "{{ mmctl }} user change-password {{ item.name }} --password '{{ item.password }}'"
+      loop: "{{ chat_accounts }}"
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: false
+      no_log: true
+
+    - name: Show AAP's posts as "Ansible Automation Platform"
+      ansible.builtin.command: >-
+        {{ mmctl }} user edit {{ chat_user }} --nickname "Ansible Automation Platform"
+        --first-name Ansible --last-name "Automation Platform"
+      changed_when: false
+      failed_when: false     # older mmctl has no "user edit"; cosmetic only
+
+    - name: Create the team
+      ansible.builtin.command: "{{ mmctl }} team create --name {{ chat_team }} --display-name NetLab"
+      register: team
+      changed_when: team.rc == 0
+      failed_when: team.rc != 0 and 'already exists' not in team.stderr
+
+    - name: Create the channel
+      ansible.builtin.command: >-
+        {{ mmctl }} channel create --team {{ chat_team }} --name {{ chat_channel }}
+        --display-name "NetLab Ops" --header "Changes, incidents and what Ansible Automation Platform is doing"
+      register: channel
+      changed_when: channel.rc == 0
+      failed_when: channel.rc != 0 and 'already exists' not in (channel.stderr ~ channel.stdout)
+
+    - name: Put both users in the team and the channel
+      ansible.builtin.command: "{{ item }}"
+      loop:
+        - "{{ mmctl }} team users add {{ chat_team }} admin {{ chat_user }}"
+        - "{{ mmctl }} channel users add {{ chat_team }}:{{ chat_channel }} admin {{ chat_user }}"
+      changed_when: false
+
+    - name: Check AAP can post (log in as {{ chat_user }} from the AAP side)
+      ansible.builtin.uri:
+        url: "{{ chat_url }}/api/v4/users/login"
+        method: POST
+        body_format: json
+        body: {login_id: "{{ chat_user }}", password: "{{ chat_password }}"}
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+    - name: Where to find it
+      ansible.builtin.debug:
+        msg: "Mattermost: {{ chat_public_url }}  (log in as admin; channel NetLab Ops)"

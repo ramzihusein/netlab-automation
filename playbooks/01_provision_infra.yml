@@ -69,8 +69,8 @@
         region: "{{ aws_region }}"
         rules: >-
           {{
-            [{'proto': 'tcp', 'ports': [22, 8000], 'cidr_ip': admin_cidrs, 'rule_desc': 'admin'}]
-            + (aap_security_group_ids | map('regex_replace', '^', '{"proto": "tcp", "ports": [22, 8000], "rule_desc": "AAP", "group_id": "') | map('regex_replace', '$', '"}') | map('from_json') | list)
+            [{'proto': 'tcp', 'ports': [22, 8000, 8065], 'cidr_ip': admin_cidrs, 'rule_desc': 'admin'}]
+            + (aap_security_group_ids | map('regex_replace', '^', '{"proto": "tcp", "ports": [22, 8000, 8065], "rule_desc": "AAP", "group_id": "') | map('regex_replace', '$', '"}') | map('from_json') | list)
           }}
         tags: "{{ common_tags | combine({'Name': 'netbox-sg'}) }}"
       register: netbox_sg
@@ -214,6 +214,9 @@
         - {record: "netlab.{{ dns_zone }}", value: "{{ lab_host.public_ip_address }}"}
         - {record: "netbox.{{ dns_zone }}", value: "{{ netbox_host.public_ip_address }}"}
         - {record: "netbox-int.{{ dns_zone }}", value: "{{ netbox_host.private_ip_address }}"}
+        # Mattermost (8065) runs on the NetBox host too.
+        - {record: "chat.{{ dns_zone }}", value: "{{ netbox_host.public_ip_address }}"}
+        - {record: "chat-int.{{ dns_zone }}", value: "{{ netbox_host.private_ip_address }}"}
       loop_control:
         label: "{{ item.record }}"
 
